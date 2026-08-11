@@ -1,0 +1,47 @@
+--- original/windows-build.failure.yml
++++ artifacts/workflow-fix/MODIFIED_FILE.yml
+@@ -15,7 +15,7 @@
+ 
+     steps:
+       - name: Checkout
+-        uses: actions/checkout@v4
++        uses: actions/checkout@v7
+ 
+       - name: Static source boundary check
+         shell: pwsh
+@@ -31,8 +31,25 @@
+       - name: Build tests and Windows GUI with runner MSVC
+         shell: cmd
+         run: |
+-          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
++          set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
++          if not exist "%VSWHERE%" (
++            echo [ERROR] vswhere.exe not found at "%VSWHERE%"
++            exit /b 1
++          )
++          for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
++          if not defined VSINSTALL (
++            echo [ERROR] Visual Studio with VC.Tools.x86.x64 was not found.
++            exit /b 1
++          )
++          echo VSINSTALL=%VSINSTALL%
++          call "%VSINSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+           if errorlevel 1 exit /b 1
++          where cl.exe
++          if errorlevel 1 exit /b 1
++          where rc.exe
++          if errorlevel 1 exit /b 1
++          where dumpbin.exe
++          if errorlevel 1 exit /b 1
+           if not exist build\core mkdir build\core
+           cl.exe /nologo /std:c++17 /permissive- /utf-8 /EHsc /O2 /W4 tests\test_arc_core.cpp /Fe:build\core\test_arc_core.exe
+           if errorlevel 1 exit /b 1
+@@ -61,7 +78,7 @@
+           "SHA256=$hash"
+ 
+       - name: Upload Windows executable and audit evidence
+-        uses: actions/upload-artifact@v4
++        uses: actions/upload-artifact@v7
+         with:
+           name: ApexArcAssist-windows-x64
+           if-no-files-found: error

@@ -1,0 +1,125 @@
+GitHub Actions workflow fix — Verification Record
+=================================================
+
+CURRENT: .github/workflows/windows-build.yml / fixed / push then manually rerun
+
+CHANGED BRANCH / FIELD
+----------------------
+- Failure branch: msvc_setup
+- Failing field: hardcoded Visual Studio edition path
+  %ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat
+- Fixed field: vswhere-based discovery requiring
+  Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+- Action runtime fields:
+  actions/checkout@v4 -> actions/checkout@v7
+  actions/upload-artifact@v4 -> actions/upload-artifact@v7
+- Trigger remains manual-only: workflow_dispatch
+
+FAILURE EVIDENCE
+----------------
+GitHub Actions run:
+https://github.com/Aacaja/apex-G/actions/runs/31499225735
+
+Failed step:
+Build tests and Windows GUI with runner MSVC
+
+Literal failed output:
+The system cannot find the path specified.
+Process completed with exit code 1.
+
+The step failed before cl.exe was invoked. Static source boundary check had
+already passed. The Node.js 20 annotation was caused by actions/checkout@v4.
+
+FOUR TRANSACTION ARTIFACTS
+--------------------------
+MODIFIED_FILE: /Users/luhongquan/Pi/apex-G/artifacts/workflow-fix/MODIFIED_FILE.yml
+DIFF_FILE:     /Users/luhongquan/Pi/apex-G/artifacts/workflow-fix/DIFF_FILE.patch
+VERIFICATION:  /Users/luhongquan/Pi/apex-G/artifacts/workflow-fix/VERIFICATION.txt
+ROLLBACK:      /Users/luhongquan/Pi/apex-G/artifacts/workflow-fix/ROLLBACK.sh
+
+HASHES
+------
+Failure workflow SHA-256:
+51fcbd78344ac0312b2696303dbcfbb75b3f48f4c62a5523d724d7ee0ce4dd70
+
+Modified workflow SHA-256:
+ee57c7923c3fa170ab44480521130793c41ea0d9190d1fb30caa541a06cab49a
+
+Diff SHA-256:
+a1b97859cf9177d3099f56ecd2a935ac7e9357a818897ca26ddabda492bd592f
+
+Rollback SHA-256:
+2a56c1d4aa2302e61f837708f513aa907d7371c52c27f25010db7f021ccc2f54
+
+BASELINE
+--------
+Command:
+XDG_CACHE_HOME=/Users/luhongquan/Pi/apex-G/build/gh-cache gh run view 31499225735 --repo Aacaja/apex-G --log-failed
+
+Input:
+GitHub Actions run 31499225735, commit 9392ea2a6e8081c61247b3bc56184bac92cfd971
+
+Literal result:
+Static source boundary check: success
+Build tests and Windows GUI with runner MSVC: failure
+The system cannot find the path specified.
+Process completed with exit code 1.
+
+Exit status:
+0 for log retrieval; failed GitHub job exit status was 1.
+
+MODIFIED
+--------
+Commands:
+ruby -e 'require "yaml"; YAML.load_file(ARGV[0]); puts "WORKFLOW_YAML_PARSE_OK"' .github/workflows/windows-build.yml
+rg -n '^on:|workflow_dispatch|push:|pull_request:|actions/(checkout|upload-artifact)@|VSWHERE|VSINSTALL|VsDevCmd|where (cl|rc|dumpbin)' .github/workflows/windows-build.yml
+./test.sh
+
+Input:
+Modified .github/workflows/windows-build.yml and project runtime sources.
+
+Literal outputs:
+WORKFLOW_YAML_PARSE_OK
+5:on:
+6:  workflow_dispatch:
+18:        uses: actions/checkout@v7
+34:          set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+39:          for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+45:          call "%VSINSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+47:          where cl.exe
+49:          where rc.exe
+51:          where dumpbin.exe
+81:        uses: actions/upload-artifact@v7
+arc_core: 460 checks, 0 failures
+FORBIDDEN_API_SCAN_OK runtime_source=src,resources
+
+Exit status:
+0
+
+ROLLBACK (TESTED ON ANOTHER COPY)
+---------------------------------
+Commands:
+cp artifacts/workflow-fix/MODIFIED_FILE.yml build/workflow-fix/rollback-probe.yml
+./artifacts/workflow-fix/ROLLBACK.sh build/workflow-fix/rollback-probe.yml
+ruby -e 'require "yaml"; YAML.load_file(ARGV[0]); puts "WORKFLOW_ROLLBACK_YAML_PARSE_OK"' build/workflow-fix/rollback-probe.yml
+cmp -s build/workflow-fix/rollback-probe.yml original/windows-build.failure.yml
+
+Input:
+build/workflow-fix/rollback-probe.yml copied from formal MODIFIED_FILE.yml
+
+Literal outputs:
+WORKFLOW_ROLLBACK_OK target=/Users/luhongquan/Pi/apex-G/build/workflow-fix/rollback-probe.yml sha256=51fcbd78344ac0312b2696303dbcfbb75b3f48f4c62a5523d724d7ee0ce4dd70 restored=original/windows-build.failure.yml
+WORKFLOW_ROLLBACK_YAML_PARSE_OK
+WORKFLOW_ROLLBACK_MATCH_EXIT=0
+FORMAL_WORKFLOW_MODIFIED_STILL_CHANGED=yes
+
+Exit statuses:
+ROLLBACK.sh = 0
+YAML parse = 0
+cmp restored copy to failure workflow = 0
+
+Restored behavior/status:
+- The rollback probe exactly restores the failing Enterprise-path workflow.
+- The formal modified workflow remains on vswhere discovery and action v7.
+- The trigger remains workflow_dispatch only; pushing this fix will not launch
+  another Actions run automatically.

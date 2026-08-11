@@ -197,6 +197,14 @@ Get-Content .\dependents.txt
 
 这是预期行为。当前 YAML 只有 `workflow_dispatch`，必须手动点击 **Run workflow**。
 
+### 日志显示 `The system cannot find the path specified`，且尚未出现 `cl.exe`
+
+旧版工作流曾把 Visual Studio 写死为 `2022\\Enterprise`。当前版本已改用 Runner 自带的 `vswhere.exe` 自动定位任何包含 `VC.Tools.x86.x64` 的 Visual Studio，并会在日志打印 `VSINSTALL=...`、`where cl.exe`、`where rc.exe`、`where dumpbin.exe`。请确认仓库中的 workflow 已更新后重新手动运行。
+
+### Node.js 20 deprecated 注解
+
+当前工作流使用 `actions/checkout@v7` 与 `actions/upload-artifact@v7`（Node.js 24），不再使用产生该注解的 v4。
+
 ### `rc.exe` 找不到 manifest
 
 确认以下两个文件都已上传且大小写一致：
