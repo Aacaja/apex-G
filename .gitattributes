@@ -1,0 +1,9 @@
+*.cmd text eol=crlf
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.cpp text eol=lf
+*.h text eol=lf
+*.md text eol=lf
+*.rc text eol=crlf
+*.manifest text eol=lf

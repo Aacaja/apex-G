@@ -1,0 +1,110 @@
+Apex Arc Assist — Verification Record
+=====================================
+
+CHANGED BRANCH / FIELD
+----------------------
+- Formula branch: HIGH ARC, x = 90 - degrees(asin(y/60))/2.
+- Anchors: 30m -> 75.0000 degrees; 60m -> 45.0000 degrees.
+- Runtime capture_policy field:
+  IDLE/PAUSED/INPUT/CALIBRATE = 0 screen captures;
+  FAR = 5Hz; NEAR (<=8 degrees) ~=12Hz; READY = 3Hz;
+  OCR-lost backoff = 4Hz -> 2Hz -> 1Hz.
+- Recognition field: strict whole-token local binary glyph templates for
+  -+.0123456789; no runtime Windows OCR, GPU/video pipeline, process access,
+  hooks, memory access, synthetic input, or network API.
+
+FOUR TRANSACTION ARTIFACTS
+--------------------------
+MODIFIED_FILE: /Users/luhongquan/Pi/apex-G/artifacts/MODIFIED_FILE
+DIFF_FILE:     /Users/luhongquan/Pi/apex-G/artifacts/DIFF_FILE.patch
+VERIFICATION:  /Users/luhongquan/Pi/apex-G/artifacts/VERIFICATION.txt
+ROLLBACK:      /Users/luhongquan/Pi/apex-G/artifacts/ROLLBACK.sh
+
+HASHES
+------
+original/arc_core.h SHA-256:
+6791001b56412fef43b03e35a5005a4e05bf8fe8e75c3da018fe88c3d465f34f
+
+src/arc_core.h and artifacts/MODIFIED_FILE SHA-256:
+c54a761f71bec3ad0f9c45835f2e8b4401ccf2f4292a308b8ed175d319325bcc
+
+artifacts/DIFF_FILE.patch SHA-256:
+b639ad5b30e1f9fa289e90aa621365f0a06f09a51ce044d395a44040d3ddbdaa
+
+artifacts/ROLLBACK.sh SHA-256:
+96eb6ad4fc5f3783b6c260692aa8423630b723dcd0884c926bf58218d220bae0
+
+BASELINE
+--------
+Command:
+cd /Users/luhongquan/Pi/apex-G && clang++ -std=c++17 -Wall -Wextra -Werror -pedantic -O2 tests/baseline_test.cpp -o build/baseline/baseline_test && ./build/baseline/baseline_test
+
+Input:
+distance_m = 30.0; original/arc_core.h
+
+Literal output:
+BASELINE_OK distance=30.0000 high_arc=75.0000
+
+Exit status:
+0
+
+MODIFIED
+--------
+Command:
+cd /Users/luhongquan/Pi/apex-G && ./test.sh
+
+Input:
+src/arc_core.h; tests/test_arc_core.cpp; runtime source directories src and resources
+
+Literal output:
+arc_core: 460 checks, 0 failures
+FORBIDDEN_API_SCAN_OK runtime_source=src,resources
+
+Exit status:
+0
+
+Additional local structure validation commands:
+ruby -e 'require "yaml"; YAML.load_file(ARGV[0]); puts "WORKFLOW_YAML_PARSE_OK file=#{ARGV[0]}"' .github/workflows/windows-build.yml
+python3 -c 'import xml.etree.ElementTree as ET; ET.parse("resources/app.manifest"); print("MANIFEST_XML_PARSE_OK file=resources/app.manifest")'
+
+Literal outputs:
+WORKFLOW_YAML_PARSE_OK file=.github/workflows/windows-build.yml
+MANIFEST_XML_PARSE_OK file=resources/app.manifest
+
+Exit status:
+0
+
+ROLLBACK (TESTED ON ANOTHER COPY)
+---------------------------------
+Commands:
+cd /Users/luhongquan/Pi/apex-G
+cp artifacts/MODIFIED_FILE build/verify/rollback-probe.h
+./artifacts/ROLLBACK.sh build/verify/rollback-probe.h
+clang++ -std=c++17 -Wall -Wextra -Werror -pedantic -O2 build/verify/rollback_probe_test.cpp -o build/verify/rollback_probe_test
+./build/verify/rollback_probe_test
+
+Input:
+build/verify/rollback-probe.h copied from artifacts/MODIFIED_FILE
+
+Literal outputs:
+ROLLBACK_OK target=/Users/luhongquan/Pi/apex-G/build/verify/rollback-probe.h sha256=6791001b56412fef43b03e35a5005a4e05bf8fe8e75c3da018fe88c3d465f34f restored=original/arc_core.h
+ROLLBACK_BEHAVIOR_OK distance=30.0000 high_arc=75.0000 restored_api=original-only
+
+Exit statuses:
+ROLLBACK.sh = 0
+rollback probe compile = 0
+rollback behavior = 0
+
+Restored behavior/status:
+- The rollback probe hash exactly matches original/arc_core.h.
+- The original high-arc behavior remains 30m -> 75.0000 degrees.
+- The rollback probe exposes the original-only API surface.
+- Formal artifacts/MODIFIED_FILE remains changed and still matches src/arc_core.h.
+
+WINDOWS BUILD STATE
+-------------------
+- Not executed on this macOS host, by user direction.
+- .github/workflows/windows-build.yml is manual-only (workflow_dispatch).
+- The repository owner can manually run Windows MSVC build, core tests,
+  dumpbin PE import audit, SHA-256 generation, and artifact upload.
+- Instructions: /Users/luhongquan/Pi/apex-G/GITHUB_ACTIONS_GUIDE.md

@@ -1,0 +1,10 @@
+build/
+dist/
+.DS_Store
+ApexArcAssist.ini
+ApexArcAssist.templates
+*.obj
+*.res
+*.pdb
+*.ilk
+*.exe
