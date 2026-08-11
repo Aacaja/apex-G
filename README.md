@@ -19,7 +19,7 @@ x = 90 - degrees(asin(y / 60)) / 2
 | 步骤 | 按键 | 说明 |
 |---|---|---|
 | 1 | 启动项加入 `+cl_showpos 1`（或控制台执行 `cl_showpos 1`） | 建议**无边框窗口化**（见第 6 节） |
-| 2 | `F9` | 校准：用方向键把红色方框**只框住 `ang:` 后面的第一个 pitch 数字** |
+| 2 | `F9` | 校准：方向键移动；按住 `-` 缩小、`=`/`+` 放大；`Home` 一键恢复紧凑 `72×18`，让红框**只框住 `ang:` 后面的第一个 pitch 数字** |
 | 3 | `F5` | 单次截取当前字形 → 原样输入屏幕上的 pitch（含负号/小数点）→ Enter。可在不同角度**多次 F5** 补齐全部数字字形 |
 | 4 | `F8` | 输入距离（1–60m），Enter 确认；**空 Enter 复用上次距离** |
 | 5 | 看悬浮窗 | ARMED → 靠近目标自动进 READY 并发一声提示音（仅进入瞬间响一次） |
@@ -33,7 +33,7 @@ x = 90 - degrees(asin(y / 60)) / 2
 | `F6` | 暂停/恢复监控。**暂停 = 零 BitBlt、零轮询** |
 | `F7` | 切换符号约定：默认 Source 约定「抬头为负」（cl_showpos 向上看为负数）；切换为「抬头为正」 |
 | `F8` | 距离输入。0–9/小键盘、小数点、Backspace、Enter、Esc；Enter 确认 1–60m，空 Enter 复用上次，Esc 取消 |
-| `F9` | ROI 校准：方向键 1px、Shift+方向键 10px、Ctrl+方向键缩放、PgUp/PgDn 调阈值（±5）、Enter 保存、Esc 取消并还原 |
+| `F9` | ROI 校准：方向键移动 1px、Shift+方向键移动 10px；`-`/小键盘 `-` 居中缩小，`=`/`+`/小键盘 `+` 居中放大（均可按住连续调整）；`Home` 恢复推荐 `72×18`；Ctrl+方向键精细调宽高；PgUp/PgDn 调阈值；Enter 保存，Esc 取消 |
 | `F10` | 提示音开关 |
 | `Ctrl+Shift+Q` | 退出 |
 
@@ -56,7 +56,7 @@ x = 90 - degrees(asin(y / 60)) / 2
 实现要点（与源码一致）：
 
 - 只有 `armed && 非暂停 && 正常模式` 才会 `SetTimer` 并执行 `BitBlt`（见 `src/apex_arc_assist.cpp` 的 `CanCapture()` / `ScheduleCapture()`）。
-- 全进程只复用 **1 个屏幕 DC + 1 个内存 DC + 1 张 top-down 32 位 DIB**（96×24 默认 ROI 仅约 9KB 像素）。采集面在首次抓取时才惰性创建。
+- 全进程只复用 **1 个屏幕 DC + 1 个内存 DC + 1 张 top-down 32 位 DIB**（新安装默认 ROI 为紧凑 `72×18`，仅约 5KB 像素）。采集面在首次抓取时才惰性创建。
 - ROI 二进制哈希（FNV-1a 64 位）：像素不变则**复用上次解析结果**，不做模板匹配（悬浮窗显示 `hash-reuse` 计数）。
 - 不使用 `timeBeginPeriod` 等定时器分辨率修改，不排队采集任务；`WM_TIMER` 每次只做一件小工作。
 - 阈值默认 205（F9 模式 PgUp/PgDn 调节，范围 120–250）：提取「亮且近中性」的 HUD 像素（`high>=threshold` 且 `(max-min)<=92 || high>=248`）。
@@ -116,7 +116,7 @@ build-windows.cmd
 ./test.sh   # macOS/Linux 可用
 ```
 
-- `clang++` 编译并运行纯核心测试（`tests/test_arc_core.cpp`）：0/30/40/55/60m 锚点、无效值、导数容差、0/360 归一化、两种符号约定、数字语法、字形归一化/匹配、二进制哈希复用、READY 进入/退出迟滞、过期/无效重置。
+- `clang++` 编译并运行纯核心测试（`tests/test_arc_core.cpp`）：0/30/40/55/60m 锚点、无效值、导数容差、0/360 归一化、两种符号约定、数字语法、字形归一化/匹配、二进制哈希复用、ROI 居中缩放/紧凑复位/虚拟桌面边界、READY 进入/退出迟滞、过期/无效重置。
 - 静态扫描：`rg` 检查 `src/ resources/` 不含任何禁用 API 名（与 SECURITY_BOUNDARY.md 第 4 节同一正则）。
 
 ---
@@ -125,7 +125,7 @@ build-windows.cmd
 
 - **必须开启 `+cl_showpos 1`**（Steam/EA 启动参数；若用控制台则执行不带 `+` 的 `cl_showpos 1`），否则没有可识别的 pitch 读数。
 - **推荐无边框窗口化**：GDI 屏幕 DC 无法可靠抓取「独占全屏」DirectX 画面（可能抓到黑屏）。请使用 `-windowed -noborder`（或游戏内无边框选项）。
-- **F9 只框 pitch 数字本身**：`ang:` 行里通常还有其它角度值，必须框住**紧跟 `ang:` 后的第一个 pitch 数字**，不要框到 `ang:` 文本或 yaw/roll。建议 ROI 48–96px 宽、12–24px 高（默认 96×24）；框得越小越省时越准。
+- **F9 只框 pitch 数字本身**：若红框把两行都框进去，先按 `Home` 恢复 `72×18`，再按住 `-`（或小键盘 `-`）继续居中缩小；方向键把框移到紧跟 `ang:` 后的第一个 pitch 数字。不要框到 `ang:` 文本或 yaw/roll。建议最终约 48–96px 宽、12–24px 高；框得越小越省时越准。
 - 识别依赖 HUD 文字**亮且近中性**；若 HUD 被染色（如红色血雾），按 F9 用 PgUp/PgDn 调阈值。
 - 识别集固定为 `-+.0123456789`；分割出错或阈值不当会显示 `OCR LOST` 并按 4→2→1Hz 退避，此时请 F9 收紧 ROI + F5 补学字形。
 - READY 只是**提示**：瞄准与投掷始终由你手动完成；程序不模拟任何键鼠操作。
@@ -142,6 +142,7 @@ build-windows.cmd
 |---|---|
 | `src/apex_arc_assist.cpp` | Windows 应用：GDI 采集、模板 OCR、调度器、悬浮窗、热键 |
 | `src/arc_core.h` | 可移植核心（`original/arc_core.h` 的副本 + 扩展：公式、容差、归一化、语法、字形、哈希、READY 门） |
+| `src/roi_geometry.h` | 可移植 ROI 几何：居中缩放、72×18 紧凑复位、尺寸/虚拟桌面边界夹取 |
 | `original/arc_core.h` | 原始公式头文件，保持原样不动 |
 | `resources/app.manifest` / `ApexArcAssist.rc` | 清单与资源 |
 | `build-windows.cmd` / `.github/workflows/windows-build.yml` | MSVC 构建与 GitHub Actions EXE artifact |

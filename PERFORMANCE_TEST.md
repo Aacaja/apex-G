@@ -13,7 +13,7 @@
 | ARMED 默认占空比 | **≤ 12 次/秒**（仅靠近目标时） | 200ms 远处 5Hz；83ms ≤8° 内约 12Hz；333ms READY 3Hz；丢帧退避 250/500/1000ms；见 `DesiredInterval()` |
 | READY | ≤ 3 次/秒，**仅进入边缘一声**提示 | `kReadyIntervalMs=333`；`MessageBeep` 仅在 `ReadyEvent::kEntered` |
 | GPU | **零** GPU API/导入，GPU 引擎占用 **0%** | 仅链接 user32/gdi32；无 DXGI/D3D/WGC |
-| 内存 | 工作集 **< 10MB**，无第三方运行时/后台服务 | 单 DIB ~9KB + 模板 ~百级×216bit；/MT 静态 CRT |
+| 内存 | 工作集 **< 10MB**，无第三方运行时/后台服务 | 新安装默认 72×18 单 DIB 约 5KB + 模板约百级×216bit；/MT 静态 CRT |
 | 帧时间（你的 PC，A/B） | 三次 60 秒对照：**中位 FPS 差值 ≤ 1%**，**p95 帧时间差值 ≤ 0.5ms** | 见第 4 节协议 |
 
 自报指标（悬浮窗右下角实时显示，每秒刷新）：`CAP median/p95 us`（BitBlt+阈值）、`MATCH median/p95 us`（模板匹配或哈希复用）、`interval=…ms`、`hash-reuse=…`。**预算中的「采集+识别」= CAP + MATCH 两行之和**。
@@ -22,7 +22,7 @@
 
 1. Windows 10/11 x64，游戏**无边框窗口化**，`cl_showpos 1`，测试期间关闭其它悬浮工具（RTSS/Afterburner 画线除外，见第 4 节）。
 2. 关闭杀软实时扫描等可能周期性干扰的进程（或至少记录其在运行）。
-3. 启动 `dist\ApexArcAssist.exe`，F9 校准、F5 训练、F8 输入固定距离（如 40m），让程序进入 ARMED。
+3. 启动 `dist\ApexArcAssist.exe`；F9 时若红框过大，按 Home 恢复 72×18 或按住 `-` 缩小，再完成校准、F5 训练、F8 输入固定距离（如 40m），让程序进入 ARMED。
 4. **稳定期**：每次切换状态后先等 60s 再开始记录（模板构建、DC 创建等一次性开销不在稳态内）。
 
 ## 3. CPU / 内存 / GPU 测量

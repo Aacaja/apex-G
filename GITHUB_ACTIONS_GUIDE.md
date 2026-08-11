@@ -7,7 +7,7 @@
 它会依次完成：
 
 1. 扫描运行时源码，禁止进程/内存访问、Hook、输入合成、GPU/视频管线、系统 OCR、网络 API；
-2. 用 MSVC x64 编译并执行 460 项纯核心测试；
+2. 用 MSVC x64 编译并执行纯核心测试（测试数量会随功能增加；以日志 `arc_core: N checks, 0 failures` 为准）；
 3. 调用 `build-windows.cmd` 编译 `dist/ApexArcAssist.exe`；
 4. 用 `dumpbin` 审计 PE 导入表；
 5. 生成 `ApexArcAssist.exe.sha256`；
@@ -106,7 +106,7 @@ GitHub 网页上传时容易漏掉隐藏目录 `.github`，建议按此顺序：
 
 ```text
 FORBIDDEN_API_SCAN_OK runtime_source=src,resources
-arc_core: 460 checks, 0 failures
+arc_core: 520 checks, 0 failures
 BUILT: ...\dist\ApexArcAssist.exe
 PE_IMPORT_SCAN_OK required=USER32.dll,GDI32.dll forbidden_gpu_network_video=none
 SHA256=...
@@ -170,7 +170,7 @@ Get-Content .\dependents.txt
 1. Apex 启动项加入 `+cl_showpos 1`。
 2. 游戏使用**无边框窗口化**。
 3. 运行 `ApexArcAssist.exe`。
-4. `F9`：红框只框住 `ang:` 后第一个 pitch 数字；Enter 保存。
+4. `F9`：若红框过大，按 `Home` 恢复 `72×18`，再按住 `-`/小键盘 `-` 缩小；`=`/`+` 可放大，方向键移动。让红框只框住 `ang:` 后第一个 pitch 数字，然后 Enter 保存。
 5. `F5`：原样输入当前 pitch 并 Enter；在多个角度重复学习常见数字。
 6. `F7`：若抬头时读数方向与默认不一致，切换符号约定。
 7. `F8`：输入 1–60m 距离并 Enter。

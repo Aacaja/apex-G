@@ -23,7 +23,7 @@ It must never use process access, memory access, DLL injection, hooks, drivers, 
 
 ## MVP interaction
 - F8: enter distance input. While active, dynamically register 0–9/numpad, decimal point, Backspace, Enter, Esc as hotkeys. Enter commits 1–60m; empty Enter reuses the last distance.
-- F9: ROI calibration mode. Show a visible rectangle around only the first pitch number in the `ang:` line. Arrow keys move 1px, Shift+arrow 10px, Ctrl+arrow resize. Enter saves; Esc restores.
+- F9: ROI calibration mode. Show a visible rectangle around only the first pitch number in the `ang:` line. Arrow keys move 1px, Shift+arrow 10px; minus/numpad-minus shrink the rectangle around its centre, equals/plus/numpad-plus grow it, Home restores the recommended compact 72x18 size, and Ctrl+arrow performs 1px width/height adjustment. Resize/move keys repeat while held, the ROI is clamped to the virtual desktop after every adjustment/display change, and registration failures are shown in the overlay. Enter saves; Esc restores.
 - F5: one-shot template learning. Capture the current ROI once, then let the user type the exact visible pitch text and press Enter. Store the segmented exact glyphs; generated common-font templates remain the zero-setup fallback.
 - F6: pause/resume monitoring immediately. Paused means zero screen capture.
 - F7: toggle cl_showpos convention between `up is negative` (default, Source convention) and `up is positive`.
@@ -33,7 +33,7 @@ It must never use process access, memory access, DLL injection, hooks, drivers, 
 
 ## Ultra-light capture and glyph recognition
 - IDLE, distance input, paused, and untrained states perform zero `BitBlt` calls. The process only waits for messages/hotkeys.
-- Native GDI captures only the calibrated pitch token ROI: default 96x24 physical pixels; recommended final ROI 48–96px wide and 12–24px tall. Reuse one screen DC, one memory DC, and one top-down 32-bit DIB for the entire run.
+- Native GDI captures only the calibrated pitch token ROI: new-install default 72x18 physical pixels; recommended final ROI 48–96px wide and 12–24px tall. Existing INI values remain valid. Reuse one screen DC, one memory DC, and one top-down 32-bit DIB for the entire run.
 - Do not upscale. Threshold bright HUD text, crop connected glyph components, normalize each glyph to a small binary grid, and match against startup-generated common Windows-font templates plus optional F5 exact templates. Grammar accepts only `[+-]?dd.dd`-style numeric tokens and rejects values outside a physical pitch range.
 - Hash the binary ROI; if unchanged, reuse the previous parse without template matching.
 - Adaptive schedule: FAR 5Hz, within 8 degrees 12Hz, READY 3Hz, OCR-lost exponential backoff 4Hz -> 2Hz -> 1Hz. No timer-resolution changes and no queued capture jobs.
@@ -63,6 +63,7 @@ READY enters after two in-window samples spanning at least 120ms and at most 500
 - Preserve `original/arc_core.h` unchanged.
 - Copy it to `src/arc_core.h` and extend only the copy with portable formula, pitch normalization/mapping, OCR text number extraction, and READY gate.
 - `src/apex_arc_assist.cpp`: Windows app, tiny GDI capture, generated/user-trained template OCR, adaptive scheduler, overlay, and hotkeys.
+- `src/roi_geometry.h`: portable centred ROI resize, compact reset, dimension clamp, and virtual-desktop bounds clamp helpers.
 - `resources/app.manifest`, `resources/ApexArcAssist.rc`.
 - `build-windows.cmd`: direct MSVC/Windows SDK build into `dist/ApexArcAssist.exe`.
 - `.github/workflows/windows-build.yml`: Windows `windows-latest` MSVC build, core test, PE import audit, SHA-256, and artifact upload.
@@ -71,4 +72,4 @@ READY enters after two in-window samples spanning at least 120ms and at most 500
 - `SECURITY_BOUNDARY.md`: auditable API boundary.
 
 ## Verification
-Core tests must cover 0, 30, 40, 55, 60m anchors, invalid values, derivative-based tolerance, 0/360 normalization, both sign modes, numeric grammar, glyph normalization/matching helpers, binary hash reuse, READY enter/exit hysteresis, and stale/invalid reset. Build the core test with clang++ in the current macOS environment. Static checks must prove that no prohibited process/input/GPU/OCR APIs appear in runtime source or the PE import table.
+Core tests must cover 0, 30, 40, 55, 60m anchors, invalid values, derivative-based tolerance, 0/360 normalization, both sign modes, numeric grammar, glyph normalization/matching helpers, binary hash reuse, centred ROI resize/compact/clamp behavior, READY enter/exit hysteresis, and stale/invalid reset. Build the core test with clang++ in the current macOS environment. Static checks must prove that no prohibited process/input/GPU/OCR APIs appear in runtime source or the PE import table.

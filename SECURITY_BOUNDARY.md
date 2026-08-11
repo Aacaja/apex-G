@@ -10,8 +10,8 @@
 
 | # | 能力 | 实现与源码入口 | 边界说明 |
 |---|---|---|---|
-| A1 | 注册/注销全局热键（监听输入） | `RegisterHotKey` / `UnregisterHotKey`；见 `RegisterStaticHotkeys`、`RegisterTextHotkeys`、`RegisterCalibrationHotkeys` | 只**监听**，绝不**发送**；`MOD_NOREPEAT`；退出/模式切换时全部注销 |
-| A2 | 抓取桌面像素（用户校准的小 ROI） | `GetDC(nullptr)` + `CreateCompatibleDC` + `CreateDIBSection` + `BitBlt(SRCCOPY)`；见 `CaptureSurface` | 仅 `CanCapture()` 为真时周期采集；F5 仅单次采集；全程复用 1 屏幕 DC + 1 内存 DC + 1 top-down DIB |
+| A1 | 注册/注销全局热键（监听输入） | `RegisterHotKey` / `UnregisterHotKey`；见 `RegisterStaticHotkeys`、`RegisterTextHotkeys`、`RegisterCalibrationHotkeys` | 只**监听**，绝不**发送**；静态/文本热键使用 `MOD_NOREPEAT`，F9 校准移动/缩放键刻意允许按住连发；退出/模式切换时全部注销 |
+| A2 | 抓取桌面像素（用户校准的小 ROI） | `GetDC(nullptr)` + `CreateCompatibleDC` + `CreateDIBSection` + `BitBlt(SRCCOPY)`；见 `CaptureSurface` | 仅 `CanCapture()` 为真时周期采集；F5 仅单次采集；新安装默认 72×18，F9 可居中缩放并自动限制在虚拟桌面内；全程复用 1 屏幕 DC + 1 内存 DC + 1 top-down DIB |
 | A3 | 本地字形识别 | `SegmentGlyphs`、`NormalizeGlyph`、`OverlapScore`、`MatchScore`、`RecognizePitch` | 固定字形集 `-+.0123456789`；启动时一次性用 GDI 生成通用字体模板，另有内置 5×7 兜底与 F5 精确模板 |
 | A4 | 本地计算 | `HighArcElevationDegrees`、`ElevationToleranceDegrees`、`NormalizePitchDegrees`、`ElevationStabilizer`、`ReadyGate` | 纯 C++ 数学；3 样本中值稳定，单帧 >15° 跳变拒绝并需第二帧确认 |
 | A5 | 自己的置顶悬浮窗 | `CreateWindowExW(WS_EX_TOPMOST\|TOOLWINDOW\|NOACTIVATE\|LAYERED\|TRANSPARENT)`；`WM_NCHITTEST→HTTRANSPARENT` | 不抢焦点、点击穿透；纯 `TextOutW` 自绘 |
@@ -67,7 +67,7 @@ WSAStartup|WinHttp|InternetOpen|obs-websocket
 ## 5. 数据流与数据保留
 
 ```
-屏幕像素(仅用户校准的 ~96×24 小框) --BitBlt--> 32位DIB(9KB) --阈值--> 二值网格
+屏幕像素(仅用户校准的小框；新安装默认72×18) --BitBlt--> 32位DIB(~5KB) --阈值--> 二值网格
 --FNV-1a哈希--> (哈希不变则复用上次解析, 不匹配模板) --模板匹配--> pitch 数值
 --> 本地映射为仰角 --> READY门 --> 悬浮窗文本 + 一次MessageBeep
 ```
@@ -80,7 +80,7 @@ WSAStartup|WinHttp|InternetOpen|obs-websocket
 
 | 风险面 | 评估 |
 |---|---|
-| 全局热键 | 存在的最小监听面：F5/F6/F7/F8/F9/F10/Ctrl+Shift+Q；与其它程序冲突时 RegisterHotKey 失败并提示，属可审计、可移除 |
+| 全局热键 | 常驻监听面为 F5/F6/F7/F8/F9/F10/Ctrl+Shift+Q；距离/训练模式临时注册数字、符号、Enter/Esc，F9 模式临时注册方向键、`-/=/+`、小键盘加减、Home、PgUp/PgDn、Enter/Esc；模式退出即注销，注册冲突会提示 |
 | 屏幕捕获 | 只抓用户校准的矩形；但**该矩形内的一切桌面内容**都会进入进程并被二值化——请勿让 ROI 覆盖其它敏感窗口 |
 | 本地文件 | ini/模板与 exe 同目录，写入需要该目录权限；仅本进程写入 |
 | 恶意对抗 | 程序无任何代码执行路径可被外部触发（无网络、无插件、无命令行参数处理以外的行为）；唯一外部输入是热键与屏幕像素 |

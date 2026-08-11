@@ -1,0 +1,126 @@
+F9 ROI resize feature — Verification Record
+===========================================
+
+CURRENT: F9 calibration / resizable compact ROI / push then manually rebuild
+
+CHANGED BRANCH / FIELD
+----------------------
+- Calibration branch: UiMode::kCalibrate
+- ROI default: 96x24 -> 72x18 for new installs; existing INI values remain valid.
+- Quick shrink: '-' and numpad '-' (centre-preserving, repeat while held).
+- Quick grow: '=', '+', and numpad '+' (centre-preserving, repeat while held).
+- Compact reset: Home -> 72x18.
+- Fine resize: Ctrl+arrow -> 1 physical pixel width/height adjustment.
+- Move: arrow -> 1px; Shift+arrow -> 10px; repeat while held.
+- Bounds: every adjustment/display change clamps ROI to the virtual desktop.
+- Feedback: incomplete calibration hotkey registration is shown in the overlay.
+- Warning cleanup: WIN32_LEAN_AND_MEAN/NOMINMAX use conditional definitions;
+  std::fill uses explicit uint8_t{0}.
+
+FOUR TRANSACTION ARTIFACTS
+--------------------------
+MODIFIED_FILE: /Users/luhongquan/Pi/apex-G/artifacts/roi-resize/MODIFIED_FILE.tar.gz
+DIFF_FILE:     /Users/luhongquan/Pi/apex-G/artifacts/roi-resize/DIFF_FILE.patch
+VERIFICATION:  /Users/luhongquan/Pi/apex-G/artifacts/roi-resize/VERIFICATION.txt
+ROLLBACK:      /Users/luhongquan/Pi/apex-G/artifacts/roi-resize/ROLLBACK.sh
+
+HASHES
+------
+Pre-change src/apex_arc_assist.cpp SHA-256:
+a5f510e0d89b2bfef93ad5bb163ccea725fd7c3855e212921459e720497ad862
+
+Modified src/apex_arc_assist.cpp SHA-256:
+ef4fbe67df743791ead88e3f83c2f89f6fdca844020d9163b67ebbbe17bf0cb6
+
+New src/roi_geometry.h SHA-256:
+c018902846eb8bbe9a3b234eb7e7e402781f00524a04aa37489a1cba4b820289
+
+Pre-change tests/test_arc_core.cpp SHA-256:
+ced38fb036f3f951e9e4fedf8e89b4cd0702eac8bccd56197f596cf563ed4a38
+
+Modified tests/test_arc_core.cpp SHA-256:
+aaeed87815ac3348e5eabb4c4fef892b8a646709dbee454f3732f422c2f6c51f
+
+MODIFIED_FILE.tar.gz SHA-256:
+cb28c28dd2c617a680b856facf1976e0243b32770f50cf7294697487a741eb6f
+
+DIFF_FILE.patch SHA-256:
+69eec4c12f97ef2257eed8aac5351ccb14c093a03b06a985d6b972d1d9ea0cc9
+
+ROLLBACK.sh SHA-256:
+770da3ac96c34cca281cfc19a1999eb05d4c13773d5c57986f400693f000381c
+
+BASELINE
+--------
+Commands:
+cd /Users/luhongquan/Pi/apex-G
+rg -n 'HK_CAL_SHRINK|HK_CAL_COMPACT|ResizeRoiCentered|72x18|72×18' src tests README.md TASK_SPEC.md GITHUB_ACTIONS_GUIDE.md
+./test.sh
+
+Input:
+Pre-change source snapshots under original/roi-resize and the original project.
+
+Literal results:
+BASELINE_FEATURE_ABSENT_OK
+arc_core: 460 checks, 0 failures
+FORBIDDEN_API_SCAN_OK runtime_source=src,resources
+
+Exit status:
+0
+
+MODIFIED
+--------
+Command:
+cd /Users/luhongquan/Pi/apex-G && ./test.sh
+
+Input:
+src/apex_arc_assist.cpp, src/roi_geometry.h, tests/test_arc_core.cpp,
+src and resources runtime boundary.
+
+Literal output:
+arc_core: 520 checks, 0 failures
+FORBIDDEN_API_SCAN_OK runtime_source=src,resources
+
+Additional structure commands/results:
+ruby -e 'require "yaml"; YAML.load_file(ARGV[0]); puts "WORKFLOW_YAML_PARSE_OK"' .github/workflows/windows-build.yml
+WORKFLOW_YAML_PARSE_OK
+
+python3 manifest XML parse
+MANIFEST_XML_PARSE_OK
+
+Exit status:
+0
+
+ROLLBACK (TESTED ON ANOTHER COPY)
+---------------------------------
+Commands:
+cd /Users/luhongquan/Pi/apex-G
+./artifacts/roi-resize/ROLLBACK.sh build/roi-resize/rollback-probe
+clang++ -std=c++17 -Wall -Wextra -Werror -pedantic -O2 \
+  build/roi-resize/rollback-probe/tests/test_arc_core.cpp \
+  -o build/roi-resize/rollback-probe/build/test_arc_core
+build/roi-resize/rollback-probe/build/test_arc_core
+
+Input:
+Independent probe copied from the formal modified source and documentation.
+
+Literal outputs:
+ROI_RESIZE_ROLLBACK_OK target=/Users/luhongquan/Pi/apex-G/build/roi-resize/rollback-probe restored=pre-resize removed=src/roi_geometry.h
+arc_core: 460 checks, 0 failures
+
+Exit statuses:
+ROLLBACK.sh = 0
+rollback compile = 0
+rollback behavior = 0
+
+Restored behavior/status:
+- The rollback probe restores the pre-resize app, tests, and documentation.
+- src/roi_geometry.h is removed from the rollback probe.
+- The formal project remains modified: src/roi_geometry.h exists and test.sh
+  reports 520 checks, 0 failures.
+
+WINDOWS BUILD STATE
+-------------------
+- Previous commit e5f8eed built successfully on Windows run 31500665808.
+- This ROI resize commit must be manually rebuilt after push because the
+  workflow remains workflow_dispatch only.

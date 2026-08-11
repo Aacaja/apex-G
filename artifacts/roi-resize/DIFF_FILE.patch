@@ -1,0 +1,598 @@
+--- original/roi-resize/src/apex_arc_assist.cpp
++++ src/apex_arc_assist.cpp
+@@ -9,12 +9,17 @@
+ #ifndef _UNICODE
+ #define _UNICODE
+ #endif
++#ifndef WIN32_LEAN_AND_MEAN
+ #define WIN32_LEAN_AND_MEAN
++#endif
++#ifndef NOMINMAX
+ #define NOMINMAX
++#endif
+ 
+ #include <windows.h>
+ 
+ #include "arc_core.h"
++#include "roi_geometry.h"
+ 
+ #include <algorithm>
+ #include <array>
+@@ -90,13 +95,14 @@
+ constexpr int HK_CAL_THRESHOLD_DOWN = 153;
+ constexpr int HK_CAL_ENTER = 154;
+ constexpr int HK_CAL_ESCAPE = 155;
++constexpr int HK_CAL_SHRINK = 156;
++constexpr int HK_CAL_SHRINK_NUMPAD = 157;
++constexpr int HK_CAL_GROW = 158;
++constexpr int HK_CAL_GROW_SHIFT = 159;
++constexpr int HK_CAL_GROW_NUMPAD = 160;
++constexpr int HK_CAL_COMPACT = 161;
+ 
+-struct Roi {
+-  int x = 48;
+-  int y = 36;
+-  int w = 96;
+-  int h = 24;
+-};
++using Roi = arcassist::RoiGeometry;
+ 
+ enum class UiMode { kNormal, kDistance, kCalibrate, kTrainLabel };
+ 
+@@ -324,7 +330,7 @@
+   constexpr int width = 64;
+   constexpr int height = 64;
+   SelectObject(dc, bitmap);
+-  std::fill(bits, bits + width * height * 4, 0);
++  std::fill(bits, bits + width * height * 4, std::uint8_t{0});
+   SetBkColor(dc, RGB(0, 0, 0));
+   SetTextColor(dc, RGB(255, 255, 255));
+   SetBkMode(dc, OPAQUE);
+@@ -585,6 +591,7 @@
+   bool Initialize(HINSTANCE instance) {
+     instance_ = instance;
+     LoadConfig();
++    ClampRoiToVirtualScreen();
+     templates_ = BuildWindowsFontTemplates();
+     learned_file_.Load(&learned_templates_);
+     templates_.insert(templates_.end(), learned_templates_.begin(),
+@@ -752,7 +759,12 @@
+         return 0;
+       case WM_DISPLAYCHANGE:
+         PositionOverlay();
+-        status_message_ = L"显示模式已变化；建议按 F9 检查 ROI。";
++        ClampRoiToVirtualScreen();
++        if (mode_ == UiMode::kCalibrate) MoveRoiWindow();
++        capture_.Reset();
++        last_hash_.reset();
++        last_recognition_ = {};
++        status_message_ = L"显示模式已变化；ROI 已限制在虚拟桌面内，建议按 F9 检查。";
+         UpdateOverlay();
+         return 0;
+       case WM_NCHITTEST:
+@@ -770,8 +782,12 @@
+     const int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+     roi_.x = ReadIniInt(ini_path_, L"capture", L"roi_x", vx + 48);
+     roi_.y = ReadIniInt(ini_path_, L"capture", L"roi_y", vy + 36);
+-    roi_.w = std::clamp(ReadIniInt(ini_path_, L"capture", L"roi_w", 96), 24, 240);
+-    roi_.h = std::clamp(ReadIniInt(ini_path_, L"capture", L"roi_h", 24), 10, 80);
++    roi_.w = std::clamp(
++        ReadIniInt(ini_path_, L"capture", L"roi_w", arcassist::kDefaultRoiWidth),
++        arcassist::kMinRoiWidth, arcassist::kMaxRoiWidth);
++    roi_.h = std::clamp(
++        ReadIniInt(ini_path_, L"capture", L"roi_h", arcassist::kDefaultRoiHeight),
++        arcassist::kMinRoiHeight, arcassist::kMaxRoiHeight);
+     threshold_ = std::clamp(ReadIniInt(ini_path_, L"capture", L"threshold", 205),
+                             120, 250);
+     convention_ = ReadIniInt(ini_path_, L"general", L"up_is_positive", 0) != 0
+@@ -794,8 +810,11 @@
+     WriteIniDouble(ini_path_, L"general", L"last_distance", last_distance_);
+   }
+ 
+-  bool RegisterOne(int id, UINT modifiers, UINT key) const {
+-    return RegisterHotKey(overlay_, id, modifiers | MOD_NOREPEAT, key) != FALSE;
++  bool RegisterOne(int id, UINT modifiers, UINT key,
++                   bool suppress_repeat = true) const {
++    const UINT effective_modifiers =
++        suppress_repeat ? modifiers | MOD_NOREPEAT : modifiers;
++    return RegisterHotKey(overlay_, id, effective_modifiers, key) != FALSE;
+   }
+ 
+   bool RegisterStaticHotkeys() {
+@@ -812,7 +831,7 @@
+ 
+   void UnregisterDynamicHotkeys() {
+     if (!overlay_) return;
+-    for (int id = HK_TEXT_DIGIT_BASE; id <= HK_CAL_ESCAPE; ++id) {
++    for (int id = HK_TEXT_DIGIT_BASE; id <= HK_CAL_COMPACT; ++id) {
+       UnregisterHotKey(overlay_, id);
+     }
+   }
+@@ -840,20 +859,28 @@
+   bool RegisterCalibrationHotkeys() {
+     UnregisterDynamicHotkeys();
+     bool ok = true;
+-    ok = RegisterOne(HK_CAL_LEFT, 0, VK_LEFT) && ok;
+-    ok = RegisterOne(HK_CAL_RIGHT, 0, VK_RIGHT) && ok;
+-    ok = RegisterOne(HK_CAL_UP, 0, VK_UP) && ok;
+-    ok = RegisterOne(HK_CAL_DOWN, 0, VK_DOWN) && ok;
+-    ok = RegisterOne(HK_CAL_SHIFT_LEFT, MOD_SHIFT, VK_LEFT) && ok;
+-    ok = RegisterOne(HK_CAL_SHIFT_RIGHT, MOD_SHIFT, VK_RIGHT) && ok;
+-    ok = RegisterOne(HK_CAL_SHIFT_UP, MOD_SHIFT, VK_UP) && ok;
+-    ok = RegisterOne(HK_CAL_SHIFT_DOWN, MOD_SHIFT, VK_DOWN) && ok;
+-    ok = RegisterOne(HK_CAL_CTRL_LEFT, MOD_CONTROL, VK_LEFT) && ok;
+-    ok = RegisterOne(HK_CAL_CTRL_RIGHT, MOD_CONTROL, VK_RIGHT) && ok;
+-    ok = RegisterOne(HK_CAL_CTRL_UP, MOD_CONTROL, VK_UP) && ok;
+-    ok = RegisterOne(HK_CAL_CTRL_DOWN, MOD_CONTROL, VK_DOWN) && ok;
+-    ok = RegisterOne(HK_CAL_THRESHOLD_UP, 0, VK_PRIOR) && ok;
+-    ok = RegisterOne(HK_CAL_THRESHOLD_DOWN, 0, VK_NEXT) && ok;
++    // Calibration controls deliberately allow key repeat so the box can be
++    // moved or resized quickly while a key is held down.
++    ok = RegisterOne(HK_CAL_LEFT, 0, VK_LEFT, false) && ok;
++    ok = RegisterOne(HK_CAL_RIGHT, 0, VK_RIGHT, false) && ok;
++    ok = RegisterOne(HK_CAL_UP, 0, VK_UP, false) && ok;
++    ok = RegisterOne(HK_CAL_DOWN, 0, VK_DOWN, false) && ok;
++    ok = RegisterOne(HK_CAL_SHIFT_LEFT, MOD_SHIFT, VK_LEFT, false) && ok;
++    ok = RegisterOne(HK_CAL_SHIFT_RIGHT, MOD_SHIFT, VK_RIGHT, false) && ok;
++    ok = RegisterOne(HK_CAL_SHIFT_UP, MOD_SHIFT, VK_UP, false) && ok;
++    ok = RegisterOne(HK_CAL_SHIFT_DOWN, MOD_SHIFT, VK_DOWN, false) && ok;
++    ok = RegisterOne(HK_CAL_CTRL_LEFT, MOD_CONTROL, VK_LEFT, false) && ok;
++    ok = RegisterOne(HK_CAL_CTRL_RIGHT, MOD_CONTROL, VK_RIGHT, false) && ok;
++    ok = RegisterOne(HK_CAL_CTRL_UP, MOD_CONTROL, VK_UP, false) && ok;
++    ok = RegisterOne(HK_CAL_CTRL_DOWN, MOD_CONTROL, VK_DOWN, false) && ok;
++    ok = RegisterOne(HK_CAL_THRESHOLD_UP, 0, VK_PRIOR, false) && ok;
++    ok = RegisterOne(HK_CAL_THRESHOLD_DOWN, 0, VK_NEXT, false) && ok;
++    ok = RegisterOne(HK_CAL_SHRINK, 0, VK_OEM_MINUS, false) && ok;
++    ok = RegisterOne(HK_CAL_SHRINK_NUMPAD, 0, VK_SUBTRACT, false) && ok;
++    ok = RegisterOne(HK_CAL_GROW, 0, VK_OEM_PLUS, false) && ok;
++    ok = RegisterOne(HK_CAL_GROW_SHIFT, MOD_SHIFT, VK_OEM_PLUS, false) && ok;
++    ok = RegisterOne(HK_CAL_GROW_NUMPAD, 0, VK_ADD, false) && ok;
++    ok = RegisterOne(HK_CAL_COMPACT, 0, VK_HOME) && ok;
+     ok = RegisterOne(HK_CAL_ENTER, 0, VK_RETURN) && ok;
+     ok = RegisterOne(HK_CAL_ESCAPE, 0, VK_ESCAPE) && ok;
+     return ok;
+@@ -941,10 +968,13 @@
+     saved_roi_ = roi_;
+     saved_threshold_ = threshold_;
+     mode_ = UiMode::kCalibrate;
+-    RegisterCalibrationHotkeys();
++    const bool hotkeys_ok = RegisterCalibrationHotkeys();
++    ClampRoiToVirtualScreen();
+     MoveRoiWindow();
+     ShowWindow(roi_window_, SW_SHOWNOACTIVATE);
+-    status_message_ = L"F9 校准：框住 ang: 后第一个 pitch 数字，不要框 ang: 或 yaw。";
++    status_message_ = hotkeys_ok
++                          ? L"F9 校准：-/小键盘-缩小，=/+/小键盘+放大，Home恢复72×18。"
++                          : L"F9 校准热键注册不完整；请关闭占用方向键或 +/- 的程序后重试。";
+     UpdateOverlay();
+   }
+ 
+@@ -1127,10 +1157,33 @@
+     roi_.x += move_x;
+     roi_.y += move_y;
+ 
+-    if (id == HK_CAL_CTRL_LEFT) roi_.w = std::max(24, roi_.w - 1);
+-    if (id == HK_CAL_CTRL_RIGHT) roi_.w = std::min(240, roi_.w + 1);
+-    if (id == HK_CAL_CTRL_UP) roi_.h = std::max(10, roi_.h - 1);
+-    if (id == HK_CAL_CTRL_DOWN) roi_.h = std::min(80, roi_.h + 1);
++    if (id == HK_CAL_CTRL_LEFT) {
++      roi_ = arcassist::ResizeRoiCentered(roi_, -1, 0);
++    }
++    if (id == HK_CAL_CTRL_RIGHT) {
++      roi_ = arcassist::ResizeRoiCentered(roi_, 1, 0);
++    }
++    if (id == HK_CAL_CTRL_UP) {
++      roi_ = arcassist::ResizeRoiCentered(roi_, 0, -1);
++    }
++    if (id == HK_CAL_CTRL_DOWN) {
++      roi_ = arcassist::ResizeRoiCentered(roi_, 0, 1);
++    }
++    if (id == HK_CAL_SHRINK || id == HK_CAL_SHRINK_NUMPAD) {
++      roi_ = arcassist::ResizeRoiCentered(
++          roi_, -arcassist::kQuickResizeWidthStep,
++          -arcassist::kQuickResizeHeightStep);
++    }
++    if (id == HK_CAL_GROW || id == HK_CAL_GROW_SHIFT ||
++        id == HK_CAL_GROW_NUMPAD) {
++      roi_ = arcassist::ResizeRoiCentered(
++          roi_, arcassist::kQuickResizeWidthStep,
++          arcassist::kQuickResizeHeightStep);
++    }
++    if (id == HK_CAL_COMPACT) {
++      roi_ = arcassist::CompactRoiCentered(roi_);
++    }
++    ClampRoiToVirtualScreen();
+     if (id == HK_CAL_THRESHOLD_UP) threshold_ = std::min(250, threshold_ + 5);
+     if (id == HK_CAL_THRESHOLD_DOWN) threshold_ = std::max(120, threshold_ - 5);
+     if (id == HK_CAL_ENTER) {
+@@ -1147,6 +1200,14 @@
+     UpdateOverlay();
+   }
+ 
++  void ClampRoiToVirtualScreen() {
++    const int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
++    const int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
++    const int right = left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
++    const int bottom = top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
++    roi_ = arcassist::ClampRoiToBounds(roi_, left, top, right, bottom);
++  }
++
+   bool CanCapture() const {
+     return overlay_ && mode_ == UiMode::kNormal && armed_ && !paused_;
+   }
+@@ -1375,7 +1436,8 @@
+     } else if (mode_ == UiMode::kCalibrate) {
+       std::wostringstream cal;
+       cal << L"ROI " << roi_.x << L"," << roi_.y << L"  " << roi_.w << L"×"
+-          << roi_.h << L"  threshold=" << threshold_;
++          << roi_.h << L"  threshold=" << threshold_
++          << L"  [-]缩小 [=]放大 [Home]72×18";
+       DrawLine(dc, 16, y, cal.str(), white, body_font);
+       y += 28;
+     } else if (armed_ && target_elevation_) {
+--- /dev/null
++++ src/roi_geometry.h
+@@ -0,0 +1,51 @@
++#pragma once
++
++#include <algorithm>
++
++namespace arcassist {
++
++constexpr int kMinRoiWidth = 24;
++constexpr int kMinRoiHeight = 10;
++constexpr int kMaxRoiWidth = 240;
++constexpr int kMaxRoiHeight = 80;
++constexpr int kDefaultRoiWidth = 72;
++constexpr int kDefaultRoiHeight = 18;
++constexpr int kQuickResizeWidthStep = 8;
++constexpr int kQuickResizeHeightStep = 4;
++
++struct RoiGeometry {
++  int x = 48;
++  int y = 36;
++  int w = kDefaultRoiWidth;
++  int h = kDefaultRoiHeight;
++};
++
++inline RoiGeometry ResizeRoiCentered(RoiGeometry roi, int width_delta,
++                                     int height_delta) {
++  const int old_width = roi.w;
++  const int old_height = roi.h;
++  roi.w = std::clamp(roi.w + width_delta, kMinRoiWidth, kMaxRoiWidth);
++  roi.h = std::clamp(roi.h + height_delta, kMinRoiHeight, kMaxRoiHeight);
++  roi.x += (old_width - roi.w) / 2;
++  roi.y += (old_height - roi.h) / 2;
++  return roi;
++}
++
++inline RoiGeometry CompactRoiCentered(RoiGeometry roi) {
++  return ResizeRoiCentered(roi, kDefaultRoiWidth - roi.w,
++                           kDefaultRoiHeight - roi.h);
++}
++
++inline RoiGeometry ClampRoiToBounds(RoiGeometry roi, int left, int top,
++                                    int right, int bottom) {
++  if (right <= left || bottom <= top) return roi;
++  const int bounds_width = right - left;
++  const int bounds_height = bottom - top;
++  roi.w = std::clamp(roi.w, 1, bounds_width);
++  roi.h = std::clamp(roi.h, 1, bounds_height);
++  roi.x = std::clamp(roi.x, left, right - roi.w);
++  roi.y = std::clamp(roi.y, top, bottom - roi.h);
++  return roi;
++}
++
++}  // namespace arcassist
+--- original/roi-resize/tests/test_arc_core.cpp
++++ tests/test_arc_core.cpp
+@@ -2,9 +2,11 @@
+ // Pure-core tests for src/arc_core.h (portable; macOS clang++ / Linux / Windows).
+ // Covers TASK_SPEC.md verification list: anchors, invalid values,
+ // derivative tolerance, 0/360 normalization, both sign modes, numeric
+-// grammar, glyph helpers, hash reuse, READY hysteresis, stale/invalid reset.
++// grammar, glyph helpers, hash reuse, ROI geometry, READY hysteresis,
++// stale/invalid reset.
+ 
+ #include "../src/arc_core.h"
++#include "../src/roi_geometry.h"
+ 
+ #include <cmath>
+ #include <cstdint>
+@@ -43,6 +45,7 @@
+ using arcassist::GlyphTemplate;
+ using arcassist::ReadyEvent;
+ using arcassist::ReadyGate;
++using arcassist::RoiGeometry;
+ 
+ // Render text using template grids (test helper mirroring the OCR pipeline).
+ BinaryGrid RenderText(const std::string& text,
+@@ -462,6 +465,111 @@
+ 
+ // ------------------------------------------------------------- READY gate --
+ 
++void TestRoiGeometry() {
++  RoiGeometry roi{48, 36, 96, 24};
++  const RoiGeometry shrunk = arcassist::ResizeRoiCentered(
++      roi, -arcassist::kQuickResizeWidthStep,
++      -arcassist::kQuickResizeHeightStep);
++  CHECK(shrunk.x == 52);
++  CHECK(shrunk.y == 38);
++  CHECK(shrunk.w == 88);
++  CHECK(shrunk.h == 20);
++
++  const RoiGeometry restored = arcassist::ResizeRoiCentered(
++      shrunk, arcassist::kQuickResizeWidthStep,
++      arcassist::kQuickResizeHeightStep);
++  CHECK(restored.x == roi.x);
++  CHECK(restored.y == roi.y);
++  CHECK(restored.w == roi.w);
++  CHECK(restored.h == roi.h);
++
++  const RoiGeometry compact = arcassist::CompactRoiCentered(roi);
++  CHECK(compact.x == 60);
++  CHECK(compact.y == 39);
++  CHECK(compact.w == arcassist::kDefaultRoiWidth);
++  CHECK(compact.h == arcassist::kDefaultRoiHeight);
++
++  const RoiGeometry already_compact = arcassist::CompactRoiCentered(compact);
++  CHECK(already_compact.x == compact.x);
++  CHECK(already_compact.y == compact.y);
++  CHECK(already_compact.w == compact.w);
++  CHECK(already_compact.h == compact.h);
++
++  const RoiGeometry minimum = arcassist::ResizeRoiCentered(
++      {100, 100, 30, 12}, -1000, -1000);
++  CHECK(minimum.w == arcassist::kMinRoiWidth);
++  CHECK(minimum.h == arcassist::kMinRoiHeight);
++  CHECK(minimum.x == 103);
++  CHECK(minimum.y == 101);
++
++  const RoiGeometry maximum = arcassist::ResizeRoiCentered(
++      {100, 100, 230, 70}, 1000, 1000);
++  CHECK(maximum.w == arcassist::kMaxRoiWidth);
++  CHECK(maximum.h == arcassist::kMaxRoiHeight);
++  CHECK(maximum.x == 95);
++  CHECK(maximum.y == 95);
++
++  const RoiGeometry width_only = arcassist::ResizeRoiCentered(roi, -2, 0);
++  CHECK(width_only.x == 49);
++  CHECK(width_only.y == 36);
++  CHECK(width_only.w == 94);
++  CHECK(width_only.h == 24);
++
++  const RoiGeometry height_only = arcassist::ResizeRoiCentered(roi, 0, -2);
++  CHECK(height_only.x == 48);
++  CHECK(height_only.y == 37);
++  CHECK(height_only.w == 96);
++  CHECK(height_only.h == 22);
++
++  const RoiGeometry odd_shrink = arcassist::ResizeRoiCentered(roi, -1, -1);
++  CHECK(odd_shrink.x == 48);
++  CHECK(odd_shrink.y == 36);
++  CHECK(odd_shrink.w == 95);
++  CHECK(odd_shrink.h == 23);
++  const RoiGeometry odd_restore =
++      arcassist::ResizeRoiCentered(odd_shrink, 1, 1);
++  CHECK(odd_restore.x == 48);
++  CHECK(odd_restore.y == 36);
++  CHECK(odd_restore.w == 96);
++  CHECK(odd_restore.h == 24);
++
++  const RoiGeometry left_clamped =
++      arcassist::ClampRoiToBounds({-20, 30, 72, 18}, 0, 0, 1920, 1080);
++  CHECK(left_clamped.x == 0);
++  CHECK(left_clamped.y == 30);
++  CHECK(left_clamped.w == 72);
++  CHECK(left_clamped.h == 18);
++
++  const RoiGeometry bottom_right_clamped =
++      arcassist::ClampRoiToBounds({1900, 1070, 72, 18}, 0, 0, 1920, 1080);
++  CHECK(bottom_right_clamped.x == 1848);
++  CHECK(bottom_right_clamped.y == 1062);
++  CHECK(bottom_right_clamped.w == 72);
++  CHECK(bottom_right_clamped.h == 18);
++
++  const RoiGeometry negative_virtual =
++      arcassist::ClampRoiToBounds({-2100, -1200, 72, 18}, -1920, -1080,
++                                  1920, 1080);
++  CHECK(negative_virtual.x == -1920);
++  CHECK(negative_virtual.y == -1080);
++  CHECK(negative_virtual.w == 72);
++  CHECK(negative_virtual.h == 18);
++
++  const RoiGeometry tiny_bounds =
++      arcassist::ClampRoiToBounds({0, 0, 72, 18}, 10, 20, 50, 30);
++  CHECK(tiny_bounds.x == 10);
++  CHECK(tiny_bounds.y == 20);
++  CHECK(tiny_bounds.w == 40);
++  CHECK(tiny_bounds.h == 10);
++
++  const RoiGeometry invalid_bounds =
++      arcassist::ClampRoiToBounds(roi, 10, 10, 10, 10);
++  CHECK(invalid_bounds.x == roi.x);
++  CHECK(invalid_bounds.y == roi.y);
++  CHECK(invalid_bounds.w == roi.w);
++  CHECK(invalid_bounds.h == roi.h);
++}
++
+ void TestReadyEnter() {
+   ReadyGate g;
+   CHECK(!g.ready());
+@@ -600,6 +708,7 @@
+   TestNormalizeAndMatch();
+   TestOcrPipeline();
+   TestStabilizer();
++  TestRoiGeometry();
+   TestReadyEnter();
+   TestReadyExitAndReset();
+ 
+--- original/roi-resize/docs/README.md
++++ README.md
+@@ -19,7 +19,7 @@
+ | 步骤 | 按键 | 说明 |
+ |---|---|---|
+ | 1 | 启动项加入 `+cl_showpos 1`（或控制台执行 `cl_showpos 1`） | 建议**无边框窗口化**（见第 6 节） |
+-| 2 | `F9` | 校准：用方向键把红色方框**只框住 `ang:` 后面的第一个 pitch 数字** |
++| 2 | `F9` | 校准：方向键移动；按住 `-` 缩小、`=`/`+` 放大；`Home` 一键恢复紧凑 `72×18`，让红框**只框住 `ang:` 后面的第一个 pitch 数字** |
+ | 3 | `F5` | 单次截取当前字形 → 原样输入屏幕上的 pitch（含负号/小数点）→ Enter。可在不同角度**多次 F5** 补齐全部数字字形 |
+ | 4 | `F8` | 输入距离（1–60m），Enter 确认；**空 Enter 复用上次距离** |
+ | 5 | 看悬浮窗 | ARMED → 靠近目标自动进 READY 并发一声提示音（仅进入瞬间响一次） |
+@@ -33,7 +33,7 @@
+ | `F6` | 暂停/恢复监控。**暂停 = 零 BitBlt、零轮询** |
+ | `F7` | 切换符号约定：默认 Source 约定「抬头为负」（cl_showpos 向上看为负数）；切换为「抬头为正」 |
+ | `F8` | 距离输入。0–9/小键盘、小数点、Backspace、Enter、Esc；Enter 确认 1–60m，空 Enter 复用上次，Esc 取消 |
+-| `F9` | ROI 校准：方向键 1px、Shift+方向键 10px、Ctrl+方向键缩放、PgUp/PgDn 调阈值（±5）、Enter 保存、Esc 取消并还原 |
++| `F9` | ROI 校准：方向键移动 1px、Shift+方向键移动 10px；`-`/小键盘 `-` 居中缩小，`=`/`+`/小键盘 `+` 居中放大（均可按住连续调整）；`Home` 恢复推荐 `72×18`；Ctrl+方向键精细调宽高；PgUp/PgDn 调阈值；Enter 保存，Esc 取消 |
+ | `F10` | 提示音开关 |
+ | `Ctrl+Shift+Q` | 退出 |
+ 
+@@ -56,7 +56,7 @@
+ 实现要点（与源码一致）：
+ 
+ - 只有 `armed && 非暂停 && 正常模式` 才会 `SetTimer` 并执行 `BitBlt`（见 `src/apex_arc_assist.cpp` 的 `CanCapture()` / `ScheduleCapture()`）。
+-- 全进程只复用 **1 个屏幕 DC + 1 个内存 DC + 1 张 top-down 32 位 DIB**（96×24 默认 ROI 仅约 9KB 像素）。采集面在首次抓取时才惰性创建。
++- 全进程只复用 **1 个屏幕 DC + 1 个内存 DC + 1 张 top-down 32 位 DIB**（新安装默认 ROI 为紧凑 `72×18`，仅约 5KB 像素）。采集面在首次抓取时才惰性创建。
+ - ROI 二进制哈希（FNV-1a 64 位）：像素不变则**复用上次解析结果**，不做模板匹配（悬浮窗显示 `hash-reuse` 计数）。
+ - 不使用 `timeBeginPeriod` 等定时器分辨率修改，不排队采集任务；`WM_TIMER` 每次只做一件小工作。
+ - 阈值默认 205（F9 模式 PgUp/PgDn 调节，范围 120–250）：提取「亮且近中性」的 HUD 像素（`high>=threshold` 且 `(max-min)<=92 || high>=248`）。
+@@ -116,7 +116,7 @@
+ ./test.sh   # macOS/Linux 可用
+ ```
+ 
+-- `clang++` 编译并运行纯核心测试（`tests/test_arc_core.cpp`）：0/30/40/55/60m 锚点、无效值、导数容差、0/360 归一化、两种符号约定、数字语法、字形归一化/匹配、二进制哈希复用、READY 进入/退出迟滞、过期/无效重置。
++- `clang++` 编译并运行纯核心测试（`tests/test_arc_core.cpp`）：0/30/40/55/60m 锚点、无效值、导数容差、0/360 归一化、两种符号约定、数字语法、字形归一化/匹配、二进制哈希复用、ROI 居中缩放/紧凑复位/虚拟桌面边界、READY 进入/退出迟滞、过期/无效重置。
+ - 静态扫描：`rg` 检查 `src/ resources/` 不含任何禁用 API 名（与 SECURITY_BOUNDARY.md 第 4 节同一正则）。
+ 
+ ---
+@@ -125,7 +125,7 @@
+ 
+ - **必须开启 `+cl_showpos 1`**（Steam/EA 启动参数；若用控制台则执行不带 `+` 的 `cl_showpos 1`），否则没有可识别的 pitch 读数。
+ - **推荐无边框窗口化**：GDI 屏幕 DC 无法可靠抓取「独占全屏」DirectX 画面（可能抓到黑屏）。请使用 `-windowed -noborder`（或游戏内无边框选项）。
+-- **F9 只框 pitch 数字本身**：`ang:` 行里通常还有其它角度值，必须框住**紧跟 `ang:` 后的第一个 pitch 数字**，不要框到 `ang:` 文本或 yaw/roll。建议 ROI 48–96px 宽、12–24px 高（默认 96×24）；框得越小越省时越准。
++- **F9 只框 pitch 数字本身**：若红框把两行都框进去，先按 `Home` 恢复 `72×18`，再按住 `-`（或小键盘 `-`）继续居中缩小；方向键把框移到紧跟 `ang:` 后的第一个 pitch 数字。不要框到 `ang:` 文本或 yaw/roll。建议最终约 48–96px 宽、12–24px 高；框得越小越省时越准。
+ - 识别依赖 HUD 文字**亮且近中性**；若 HUD 被染色（如红色血雾），按 F9 用 PgUp/PgDn 调阈值。
+ - 识别集固定为 `-+.0123456789`；分割出错或阈值不当会显示 `OCR LOST` 并按 4→2→1Hz 退避，此时请 F9 收紧 ROI + F5 补学字形。
+ - READY 只是**提示**：瞄准与投掷始终由你手动完成；程序不模拟任何键鼠操作。
+@@ -142,6 +142,7 @@
+ |---|---|
+ | `src/apex_arc_assist.cpp` | Windows 应用：GDI 采集、模板 OCR、调度器、悬浮窗、热键 |
+ | `src/arc_core.h` | 可移植核心（`original/arc_core.h` 的副本 + 扩展：公式、容差、归一化、语法、字形、哈希、READY 门） |
++| `src/roi_geometry.h` | 可移植 ROI 几何：居中缩放、72×18 紧凑复位、尺寸/虚拟桌面边界夹取 |
+ | `original/arc_core.h` | 原始公式头文件，保持原样不动 |
+ | `resources/app.manifest` / `ApexArcAssist.rc` | 清单与资源 |
+ | `build-windows.cmd` / `.github/workflows/windows-build.yml` | MSVC 构建与 GitHub Actions EXE artifact |
+--- original/roi-resize/docs/TASK_SPEC.md
++++ TASK_SPEC.md
+@@ -23,7 +23,7 @@
+ 
+ ## MVP interaction
+ - F8: enter distance input. While active, dynamically register 0–9/numpad, decimal point, Backspace, Enter, Esc as hotkeys. Enter commits 1–60m; empty Enter reuses the last distance.
+-- F9: ROI calibration mode. Show a visible rectangle around only the first pitch number in the `ang:` line. Arrow keys move 1px, Shift+arrow 10px, Ctrl+arrow resize. Enter saves; Esc restores.
++- F9: ROI calibration mode. Show a visible rectangle around only the first pitch number in the `ang:` line. Arrow keys move 1px, Shift+arrow 10px; minus/numpad-minus shrink the rectangle around its centre, equals/plus/numpad-plus grow it, Home restores the recommended compact 72x18 size, and Ctrl+arrow performs 1px width/height adjustment. Resize/move keys repeat while held, the ROI is clamped to the virtual desktop after every adjustment/display change, and registration failures are shown in the overlay. Enter saves; Esc restores.
+ - F5: one-shot template learning. Capture the current ROI once, then let the user type the exact visible pitch text and press Enter. Store the segmented exact glyphs; generated common-font templates remain the zero-setup fallback.
+ - F6: pause/resume monitoring immediately. Paused means zero screen capture.
+ - F7: toggle cl_showpos convention between `up is negative` (default, Source convention) and `up is positive`.
+@@ -33,7 +33,7 @@
+ 
+ ## Ultra-light capture and glyph recognition
+ - IDLE, distance input, paused, and untrained states perform zero `BitBlt` calls. The process only waits for messages/hotkeys.
+-- Native GDI captures only the calibrated pitch token ROI: default 96x24 physical pixels; recommended final ROI 48–96px wide and 12–24px tall. Reuse one screen DC, one memory DC, and one top-down 32-bit DIB for the entire run.
++- Native GDI captures only the calibrated pitch token ROI: new-install default 72x18 physical pixels; recommended final ROI 48–96px wide and 12–24px tall. Existing INI values remain valid. Reuse one screen DC, one memory DC, and one top-down 32-bit DIB for the entire run.
+ - Do not upscale. Threshold bright HUD text, crop connected glyph components, normalize each glyph to a small binary grid, and match against startup-generated common Windows-font templates plus optional F5 exact templates. Grammar accepts only `[+-]?dd.dd`-style numeric tokens and rejects values outside a physical pitch range.
+ - Hash the binary ROI; if unchanged, reuse the previous parse without template matching.
+ - Adaptive schedule: FAR 5Hz, within 8 degrees 12Hz, READY 3Hz, OCR-lost exponential backoff 4Hz -> 2Hz -> 1Hz. No timer-resolution changes and no queued capture jobs.
+@@ -63,6 +63,7 @@
+ - Preserve `original/arc_core.h` unchanged.
+ - Copy it to `src/arc_core.h` and extend only the copy with portable formula, pitch normalization/mapping, OCR text number extraction, and READY gate.
+ - `src/apex_arc_assist.cpp`: Windows app, tiny GDI capture, generated/user-trained template OCR, adaptive scheduler, overlay, and hotkeys.
++- `src/roi_geometry.h`: portable centred ROI resize, compact reset, dimension clamp, and virtual-desktop bounds clamp helpers.
+ - `resources/app.manifest`, `resources/ApexArcAssist.rc`.
+ - `build-windows.cmd`: direct MSVC/Windows SDK build into `dist/ApexArcAssist.exe`.
+ - `.github/workflows/windows-build.yml`: Windows `windows-latest` MSVC build, core test, PE import audit, SHA-256, and artifact upload.
+@@ -71,4 +72,4 @@
+ - `SECURITY_BOUNDARY.md`: auditable API boundary.
+ 
+ ## Verification
+-Core tests must cover 0, 30, 40, 55, 60m anchors, invalid values, derivative-based tolerance, 0/360 normalization, both sign modes, numeric grammar, glyph normalization/matching helpers, binary hash reuse, READY enter/exit hysteresis, and stale/invalid reset. Build the core test with clang++ in the current macOS environment. Static checks must prove that no prohibited process/input/GPU/OCR APIs appear in runtime source or the PE import table.
++Core tests must cover 0, 30, 40, 55, 60m anchors, invalid values, derivative-based tolerance, 0/360 normalization, both sign modes, numeric grammar, glyph normalization/matching helpers, binary hash reuse, centred ROI resize/compact/clamp behavior, READY enter/exit hysteresis, and stale/invalid reset. Build the core test with clang++ in the current macOS environment. Static checks must prove that no prohibited process/input/GPU/OCR APIs appear in runtime source or the PE import table.
+--- original/roi-resize/docs/GITHUB_ACTIONS_GUIDE.md
++++ GITHUB_ACTIONS_GUIDE.md
+@@ -7,7 +7,7 @@
+ 它会依次完成：
+ 
+ 1. 扫描运行时源码，禁止进程/内存访问、Hook、输入合成、GPU/视频管线、系统 OCR、网络 API；
+-2. 用 MSVC x64 编译并执行 460 项纯核心测试；
++2. 用 MSVC x64 编译并执行纯核心测试（测试数量会随功能增加；以日志 `arc_core: N checks, 0 failures` 为准）；
+ 3. 调用 `build-windows.cmd` 编译 `dist/ApexArcAssist.exe`；
+ 4. 用 `dumpbin` 审计 PE 导入表；
+ 5. 生成 `ApexArcAssist.exe.sha256`；
+@@ -106,7 +106,7 @@
+ 
+ ```text
+ FORBIDDEN_API_SCAN_OK runtime_source=src,resources
+-arc_core: 460 checks, 0 failures
++arc_core: 520 checks, 0 failures
+ BUILT: ...\dist\ApexArcAssist.exe
+ PE_IMPORT_SCAN_OK required=USER32.dll,GDI32.dll forbidden_gpu_network_video=none
+ SHA256=...
+@@ -170,7 +170,7 @@
+ 1. Apex 启动项加入 `+cl_showpos 1`。
+ 2. 游戏使用**无边框窗口化**。
+ 3. 运行 `ApexArcAssist.exe`。
+-4. `F9`：红框只框住 `ang:` 后第一个 pitch 数字；Enter 保存。
++4. `F9`：若红框过大，按 `Home` 恢复 `72×18`，再按住 `-`/小键盘 `-` 缩小；`=`/`+` 可放大，方向键移动。让红框只框住 `ang:` 后第一个 pitch 数字，然后 Enter 保存。
+ 5. `F5`：原样输入当前 pitch 并 Enter；在多个角度重复学习常见数字。
+ 6. `F7`：若抬头时读数方向与默认不一致，切换符号约定。
+ 7. `F8`：输入 1–60m 距离并 Enter。
+--- original/roi-resize/docs/PERFORMANCE_TEST.md
++++ PERFORMANCE_TEST.md
+@@ -13,7 +13,7 @@
+ | ARMED 默认占空比 | **≤ 12 次/秒**（仅靠近目标时） | 200ms 远处 5Hz；83ms ≤8° 内约 12Hz；333ms READY 3Hz；丢帧退避 250/500/1000ms；见 `DesiredInterval()` |
+ | READY | ≤ 3 次/秒，**仅进入边缘一声**提示 | `kReadyIntervalMs=333`；`MessageBeep` 仅在 `ReadyEvent::kEntered` |
+ | GPU | **零** GPU API/导入，GPU 引擎占用 **0%** | 仅链接 user32/gdi32；无 DXGI/D3D/WGC |
+-| 内存 | 工作集 **< 10MB**，无第三方运行时/后台服务 | 单 DIB ~9KB + 模板 ~百级×216bit；/MT 静态 CRT |
++| 内存 | 工作集 **< 10MB**，无第三方运行时/后台服务 | 新安装默认 72×18 单 DIB 约 5KB + 模板约百级×216bit；/MT 静态 CRT |
+ | 帧时间（你的 PC，A/B） | 三次 60 秒对照：**中位 FPS 差值 ≤ 1%**，**p95 帧时间差值 ≤ 0.5ms** | 见第 4 节协议 |
+ 
+ 自报指标（悬浮窗右下角实时显示，每秒刷新）：`CAP median/p95 us`（BitBlt+阈值）、`MATCH median/p95 us`（模板匹配或哈希复用）、`interval=…ms`、`hash-reuse=…`。**预算中的「采集+识别」= CAP + MATCH 两行之和**。
+@@ -22,7 +22,7 @@
+ 
+ 1. Windows 10/11 x64，游戏**无边框窗口化**，`cl_showpos 1`，测试期间关闭其它悬浮工具（RTSS/Afterburner 画线除外，见第 4 节）。
+ 2. 关闭杀软实时扫描等可能周期性干扰的进程（或至少记录其在运行）。
+-3. 启动 `dist\ApexArcAssist.exe`，F9 校准、F5 训练、F8 输入固定距离（如 40m），让程序进入 ARMED。
++3. 启动 `dist\ApexArcAssist.exe`；F9 时若红框过大，按 Home 恢复 72×18 或按住 `-` 缩小，再完成校准、F5 训练、F8 输入固定距离（如 40m），让程序进入 ARMED。
+ 4. **稳定期**：每次切换状态后先等 60s 再开始记录（模板构建、DC 创建等一次性开销不在稳态内）。
+ 
+ ## 3. CPU / 内存 / GPU 测量
+--- original/roi-resize/docs/SECURITY_BOUNDARY.md
++++ SECURITY_BOUNDARY.md
+@@ -10,8 +10,8 @@
+ 
+ | # | 能力 | 实现与源码入口 | 边界说明 |
+ |---|---|---|---|
+-| A1 | 注册/注销全局热键（监听输入） | `RegisterHotKey` / `UnregisterHotKey`；见 `RegisterStaticHotkeys`、`RegisterTextHotkeys`、`RegisterCalibrationHotkeys` | 只**监听**，绝不**发送**；`MOD_NOREPEAT`；退出/模式切换时全部注销 |
+-| A2 | 抓取桌面像素（用户校准的小 ROI） | `GetDC(nullptr)` + `CreateCompatibleDC` + `CreateDIBSection` + `BitBlt(SRCCOPY)`；见 `CaptureSurface` | 仅 `CanCapture()` 为真时周期采集；F5 仅单次采集；全程复用 1 屏幕 DC + 1 内存 DC + 1 top-down DIB |
++| A1 | 注册/注销全局热键（监听输入） | `RegisterHotKey` / `UnregisterHotKey`；见 `RegisterStaticHotkeys`、`RegisterTextHotkeys`、`RegisterCalibrationHotkeys` | 只**监听**，绝不**发送**；静态/文本热键使用 `MOD_NOREPEAT`，F9 校准移动/缩放键刻意允许按住连发；退出/模式切换时全部注销 |
++| A2 | 抓取桌面像素（用户校准的小 ROI） | `GetDC(nullptr)` + `CreateCompatibleDC` + `CreateDIBSection` + `BitBlt(SRCCOPY)`；见 `CaptureSurface` | 仅 `CanCapture()` 为真时周期采集；F5 仅单次采集；新安装默认 72×18，F9 可居中缩放并自动限制在虚拟桌面内；全程复用 1 屏幕 DC + 1 内存 DC + 1 top-down DIB |
+ | A3 | 本地字形识别 | `SegmentGlyphs`、`NormalizeGlyph`、`OverlapScore`、`MatchScore`、`RecognizePitch` | 固定字形集 `-+.0123456789`；启动时一次性用 GDI 生成通用字体模板，另有内置 5×7 兜底与 F5 精确模板 |
+ | A4 | 本地计算 | `HighArcElevationDegrees`、`ElevationToleranceDegrees`、`NormalizePitchDegrees`、`ElevationStabilizer`、`ReadyGate` | 纯 C++ 数学；3 样本中值稳定，单帧 >15° 跳变拒绝并需第二帧确认 |
+ | A5 | 自己的置顶悬浮窗 | `CreateWindowExW(WS_EX_TOPMOST\|TOOLWINDOW\|NOACTIVATE\|LAYERED\|TRANSPARENT)`；`WM_NCHITTEST→HTTRANSPARENT` | 不抢焦点、点击穿透；纯 `TextOutW` 自绘 |
+@@ -67,7 +67,7 @@
+ ## 5. 数据流与数据保留
+ 
+ ```
+-屏幕像素(仅用户校准的 ~96×24 小框) --BitBlt--> 32位DIB(9KB) --阈值--> 二值网格
++屏幕像素(仅用户校准的小框；新安装默认72×18) --BitBlt--> 32位DIB(~5KB) --阈值--> 二值网格
+ --FNV-1a哈希--> (哈希不变则复用上次解析, 不匹配模板) --模板匹配--> pitch 数值
+ --> 本地映射为仰角 --> READY门 --> 悬浮窗文本 + 一次MessageBeep
+ ```
+@@ -80,7 +80,7 @@
+ 
+ | 风险面 | 评估 |
+ |---|---|
+-| 全局热键 | 存在的最小监听面：F5/F6/F7/F8/F9/F10/Ctrl+Shift+Q；与其它程序冲突时 RegisterHotKey 失败并提示，属可审计、可移除 |
++| 全局热键 | 常驻监听面为 F5/F6/F7/F8/F9/F10/Ctrl+Shift+Q；距离/训练模式临时注册数字、符号、Enter/Esc，F9 模式临时注册方向键、`-/=/+`、小键盘加减、Home、PgUp/PgDn、Enter/Esc；模式退出即注销，注册冲突会提示 |
+ | 屏幕捕获 | 只抓用户校准的矩形；但**该矩形内的一切桌面内容**都会进入进程并被二值化——请勿让 ROI 覆盖其它敏感窗口 |
+ | 本地文件 | ini/模板与 exe 同目录，写入需要该目录权限；仅本进程写入 |
+ | 恶意对抗 | 程序无任何代码执行路径可被外部触发（无网络、无插件、无命令行参数处理以外的行为）；唯一外部输入是热键与屏幕像素 |

@@ -2,9 +2,11 @@
 // Pure-core tests for src/arc_core.h (portable; macOS clang++ / Linux / Windows).
 // Covers TASK_SPEC.md verification list: anchors, invalid values,
 // derivative tolerance, 0/360 normalization, both sign modes, numeric
-// grammar, glyph helpers, hash reuse, READY hysteresis, stale/invalid reset.
+// grammar, glyph helpers, hash reuse, ROI geometry, READY hysteresis,
+// stale/invalid reset.
 
 #include "../src/arc_core.h"
+#include "../src/roi_geometry.h"
 
 #include <cmath>
 #include <cstdint>
@@ -43,6 +45,7 @@ using arcassist::ElevationStabilizer;
 using arcassist::GlyphTemplate;
 using arcassist::ReadyEvent;
 using arcassist::ReadyGate;
+using arcassist::RoiGeometry;
 
 // Render text using template grids (test helper mirroring the OCR pipeline).
 BinaryGrid RenderText(const std::string& text,
@@ -462,6 +465,111 @@ void TestStabilizer() {
 
 // ------------------------------------------------------------- READY gate --
 
+void TestRoiGeometry() {
+  RoiGeometry roi{48, 36, 96, 24};
+  const RoiGeometry shrunk = arcassist::ResizeRoiCentered(
+      roi, -arcassist::kQuickResizeWidthStep,
+      -arcassist::kQuickResizeHeightStep);
+  CHECK(shrunk.x == 52);
+  CHECK(shrunk.y == 38);
+  CHECK(shrunk.w == 88);
+  CHECK(shrunk.h == 20);
+
+  const RoiGeometry restored = arcassist::ResizeRoiCentered(
+      shrunk, arcassist::kQuickResizeWidthStep,
+      arcassist::kQuickResizeHeightStep);
+  CHECK(restored.x == roi.x);
+  CHECK(restored.y == roi.y);
+  CHECK(restored.w == roi.w);
+  CHECK(restored.h == roi.h);
+
+  const RoiGeometry compact = arcassist::CompactRoiCentered(roi);
+  CHECK(compact.x == 60);
+  CHECK(compact.y == 39);
+  CHECK(compact.w == arcassist::kDefaultRoiWidth);
+  CHECK(compact.h == arcassist::kDefaultRoiHeight);
+
+  const RoiGeometry already_compact = arcassist::CompactRoiCentered(compact);
+  CHECK(already_compact.x == compact.x);
+  CHECK(already_compact.y == compact.y);
+  CHECK(already_compact.w == compact.w);
+  CHECK(already_compact.h == compact.h);
+
+  const RoiGeometry minimum = arcassist::ResizeRoiCentered(
+      {100, 100, 30, 12}, -1000, -1000);
+  CHECK(minimum.w == arcassist::kMinRoiWidth);
+  CHECK(minimum.h == arcassist::kMinRoiHeight);
+  CHECK(minimum.x == 103);
+  CHECK(minimum.y == 101);
+
+  const RoiGeometry maximum = arcassist::ResizeRoiCentered(
+      {100, 100, 230, 70}, 1000, 1000);
+  CHECK(maximum.w == arcassist::kMaxRoiWidth);
+  CHECK(maximum.h == arcassist::kMaxRoiHeight);
+  CHECK(maximum.x == 95);
+  CHECK(maximum.y == 95);
+
+  const RoiGeometry width_only = arcassist::ResizeRoiCentered(roi, -2, 0);
+  CHECK(width_only.x == 49);
+  CHECK(width_only.y == 36);
+  CHECK(width_only.w == 94);
+  CHECK(width_only.h == 24);
+
+  const RoiGeometry height_only = arcassist::ResizeRoiCentered(roi, 0, -2);
+  CHECK(height_only.x == 48);
+  CHECK(height_only.y == 37);
+  CHECK(height_only.w == 96);
+  CHECK(height_only.h == 22);
+
+  const RoiGeometry odd_shrink = arcassist::ResizeRoiCentered(roi, -1, -1);
+  CHECK(odd_shrink.x == 48);
+  CHECK(odd_shrink.y == 36);
+  CHECK(odd_shrink.w == 95);
+  CHECK(odd_shrink.h == 23);
+  const RoiGeometry odd_restore =
+      arcassist::ResizeRoiCentered(odd_shrink, 1, 1);
+  CHECK(odd_restore.x == 48);
+  CHECK(odd_restore.y == 36);
+  CHECK(odd_restore.w == 96);
+  CHECK(odd_restore.h == 24);
+
+  const RoiGeometry left_clamped =
+      arcassist::ClampRoiToBounds({-20, 30, 72, 18}, 0, 0, 1920, 1080);
+  CHECK(left_clamped.x == 0);
+  CHECK(left_clamped.y == 30);
+  CHECK(left_clamped.w == 72);
+  CHECK(left_clamped.h == 18);
+
+  const RoiGeometry bottom_right_clamped =
+      arcassist::ClampRoiToBounds({1900, 1070, 72, 18}, 0, 0, 1920, 1080);
+  CHECK(bottom_right_clamped.x == 1848);
+  CHECK(bottom_right_clamped.y == 1062);
+  CHECK(bottom_right_clamped.w == 72);
+  CHECK(bottom_right_clamped.h == 18);
+
+  const RoiGeometry negative_virtual =
+      arcassist::ClampRoiToBounds({-2100, -1200, 72, 18}, -1920, -1080,
+                                  1920, 1080);
+  CHECK(negative_virtual.x == -1920);
+  CHECK(negative_virtual.y == -1080);
+  CHECK(negative_virtual.w == 72);
+  CHECK(negative_virtual.h == 18);
+
+  const RoiGeometry tiny_bounds =
+      arcassist::ClampRoiToBounds({0, 0, 72, 18}, 10, 20, 50, 30);
+  CHECK(tiny_bounds.x == 10);
+  CHECK(tiny_bounds.y == 20);
+  CHECK(tiny_bounds.w == 40);
+  CHECK(tiny_bounds.h == 10);
+
+  const RoiGeometry invalid_bounds =
+      arcassist::ClampRoiToBounds(roi, 10, 10, 10, 10);
+  CHECK(invalid_bounds.x == roi.x);
+  CHECK(invalid_bounds.y == roi.y);
+  CHECK(invalid_bounds.w == roi.w);
+  CHECK(invalid_bounds.h == roi.h);
+}
+
 void TestReadyEnter() {
   ReadyGate g;
   CHECK(!g.ready());
@@ -600,6 +708,7 @@ int main() {
   TestNormalizeAndMatch();
   TestOcrPipeline();
   TestStabilizer();
+  TestRoiGeometry();
   TestReadyEnter();
   TestReadyExitAndReset();
 

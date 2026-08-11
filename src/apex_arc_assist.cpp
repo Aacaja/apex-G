@@ -9,12 +9,17 @@
 #ifndef _UNICODE
 #define _UNICODE
 #endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 
 #include <windows.h>
 
 #include "arc_core.h"
+#include "roi_geometry.h"
 
 #include <algorithm>
 #include <array>
@@ -90,13 +95,14 @@ constexpr int HK_CAL_THRESHOLD_UP = 152;
 constexpr int HK_CAL_THRESHOLD_DOWN = 153;
 constexpr int HK_CAL_ENTER = 154;
 constexpr int HK_CAL_ESCAPE = 155;
+constexpr int HK_CAL_SHRINK = 156;
+constexpr int HK_CAL_SHRINK_NUMPAD = 157;
+constexpr int HK_CAL_GROW = 158;
+constexpr int HK_CAL_GROW_SHIFT = 159;
+constexpr int HK_CAL_GROW_NUMPAD = 160;
+constexpr int HK_CAL_COMPACT = 161;
 
-struct Roi {
-  int x = 48;
-  int y = 36;
-  int w = 96;
-  int h = 24;
-};
+using Roi = arcassist::RoiGeometry;
 
 enum class UiMode { kNormal, kDistance, kCalibrate, kTrainLabel };
 
@@ -324,7 +330,7 @@ BinaryGrid RenderOneGlyph(HDC dc, HBITMAP bitmap, std::uint8_t* bits,
   constexpr int width = 64;
   constexpr int height = 64;
   SelectObject(dc, bitmap);
-  std::fill(bits, bits + width * height * 4, 0);
+  std::fill(bits, bits + width * height * 4, std::uint8_t{0});
   SetBkColor(dc, RGB(0, 0, 0));
   SetTextColor(dc, RGB(255, 255, 255));
   SetBkMode(dc, OPAQUE);
@@ -585,6 +591,7 @@ class App {
   bool Initialize(HINSTANCE instance) {
     instance_ = instance;
     LoadConfig();
+    ClampRoiToVirtualScreen();
     templates_ = BuildWindowsFontTemplates();
     learned_file_.Load(&learned_templates_);
     templates_.insert(templates_.end(), learned_templates_.begin(),
@@ -752,7 +759,12 @@ class App {
         return 0;
       case WM_DISPLAYCHANGE:
         PositionOverlay();
-        status_message_ = L"显示模式已变化；建议按 F9 检查 ROI。";
+        ClampRoiToVirtualScreen();
+        if (mode_ == UiMode::kCalibrate) MoveRoiWindow();
+        capture_.Reset();
+        last_hash_.reset();
+        last_recognition_ = {};
+        status_message_ = L"显示模式已变化；ROI 已限制在虚拟桌面内，建议按 F9 检查。";
         UpdateOverlay();
         return 0;
       case WM_NCHITTEST:
@@ -770,8 +782,12 @@ class App {
     const int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
     roi_.x = ReadIniInt(ini_path_, L"capture", L"roi_x", vx + 48);
     roi_.y = ReadIniInt(ini_path_, L"capture", L"roi_y", vy + 36);
-    roi_.w = std::clamp(ReadIniInt(ini_path_, L"capture", L"roi_w", 96), 24, 240);
-    roi_.h = std::clamp(ReadIniInt(ini_path_, L"capture", L"roi_h", 24), 10, 80);
+    roi_.w = std::clamp(
+        ReadIniInt(ini_path_, L"capture", L"roi_w", arcassist::kDefaultRoiWidth),
+        arcassist::kMinRoiWidth, arcassist::kMaxRoiWidth);
+    roi_.h = std::clamp(
+        ReadIniInt(ini_path_, L"capture", L"roi_h", arcassist::kDefaultRoiHeight),
+        arcassist::kMinRoiHeight, arcassist::kMaxRoiHeight);
     threshold_ = std::clamp(ReadIniInt(ini_path_, L"capture", L"threshold", 205),
                             120, 250);
     convention_ = ReadIniInt(ini_path_, L"general", L"up_is_positive", 0) != 0
@@ -794,8 +810,11 @@ class App {
     WriteIniDouble(ini_path_, L"general", L"last_distance", last_distance_);
   }
 
-  bool RegisterOne(int id, UINT modifiers, UINT key) const {
-    return RegisterHotKey(overlay_, id, modifiers | MOD_NOREPEAT, key) != FALSE;
+  bool RegisterOne(int id, UINT modifiers, UINT key,
+                   bool suppress_repeat = true) const {
+    const UINT effective_modifiers =
+        suppress_repeat ? modifiers | MOD_NOREPEAT : modifiers;
+    return RegisterHotKey(overlay_, id, effective_modifiers, key) != FALSE;
   }
 
   bool RegisterStaticHotkeys() {
@@ -812,7 +831,7 @@ class App {
 
   void UnregisterDynamicHotkeys() {
     if (!overlay_) return;
-    for (int id = HK_TEXT_DIGIT_BASE; id <= HK_CAL_ESCAPE; ++id) {
+    for (int id = HK_TEXT_DIGIT_BASE; id <= HK_CAL_COMPACT; ++id) {
       UnregisterHotKey(overlay_, id);
     }
   }
@@ -840,20 +859,28 @@ class App {
   bool RegisterCalibrationHotkeys() {
     UnregisterDynamicHotkeys();
     bool ok = true;
-    ok = RegisterOne(HK_CAL_LEFT, 0, VK_LEFT) && ok;
-    ok = RegisterOne(HK_CAL_RIGHT, 0, VK_RIGHT) && ok;
-    ok = RegisterOne(HK_CAL_UP, 0, VK_UP) && ok;
-    ok = RegisterOne(HK_CAL_DOWN, 0, VK_DOWN) && ok;
-    ok = RegisterOne(HK_CAL_SHIFT_LEFT, MOD_SHIFT, VK_LEFT) && ok;
-    ok = RegisterOne(HK_CAL_SHIFT_RIGHT, MOD_SHIFT, VK_RIGHT) && ok;
-    ok = RegisterOne(HK_CAL_SHIFT_UP, MOD_SHIFT, VK_UP) && ok;
-    ok = RegisterOne(HK_CAL_SHIFT_DOWN, MOD_SHIFT, VK_DOWN) && ok;
-    ok = RegisterOne(HK_CAL_CTRL_LEFT, MOD_CONTROL, VK_LEFT) && ok;
-    ok = RegisterOne(HK_CAL_CTRL_RIGHT, MOD_CONTROL, VK_RIGHT) && ok;
-    ok = RegisterOne(HK_CAL_CTRL_UP, MOD_CONTROL, VK_UP) && ok;
-    ok = RegisterOne(HK_CAL_CTRL_DOWN, MOD_CONTROL, VK_DOWN) && ok;
-    ok = RegisterOne(HK_CAL_THRESHOLD_UP, 0, VK_PRIOR) && ok;
-    ok = RegisterOne(HK_CAL_THRESHOLD_DOWN, 0, VK_NEXT) && ok;
+    // Calibration controls deliberately allow key repeat so the box can be
+    // moved or resized quickly while a key is held down.
+    ok = RegisterOne(HK_CAL_LEFT, 0, VK_LEFT, false) && ok;
+    ok = RegisterOne(HK_CAL_RIGHT, 0, VK_RIGHT, false) && ok;
+    ok = RegisterOne(HK_CAL_UP, 0, VK_UP, false) && ok;
+    ok = RegisterOne(HK_CAL_DOWN, 0, VK_DOWN, false) && ok;
+    ok = RegisterOne(HK_CAL_SHIFT_LEFT, MOD_SHIFT, VK_LEFT, false) && ok;
+    ok = RegisterOne(HK_CAL_SHIFT_RIGHT, MOD_SHIFT, VK_RIGHT, false) && ok;
+    ok = RegisterOne(HK_CAL_SHIFT_UP, MOD_SHIFT, VK_UP, false) && ok;
+    ok = RegisterOne(HK_CAL_SHIFT_DOWN, MOD_SHIFT, VK_DOWN, false) && ok;
+    ok = RegisterOne(HK_CAL_CTRL_LEFT, MOD_CONTROL, VK_LEFT, false) && ok;
+    ok = RegisterOne(HK_CAL_CTRL_RIGHT, MOD_CONTROL, VK_RIGHT, false) && ok;
+    ok = RegisterOne(HK_CAL_CTRL_UP, MOD_CONTROL, VK_UP, false) && ok;
+    ok = RegisterOne(HK_CAL_CTRL_DOWN, MOD_CONTROL, VK_DOWN, false) && ok;
+    ok = RegisterOne(HK_CAL_THRESHOLD_UP, 0, VK_PRIOR, false) && ok;
+    ok = RegisterOne(HK_CAL_THRESHOLD_DOWN, 0, VK_NEXT, false) && ok;
+    ok = RegisterOne(HK_CAL_SHRINK, 0, VK_OEM_MINUS, false) && ok;
+    ok = RegisterOne(HK_CAL_SHRINK_NUMPAD, 0, VK_SUBTRACT, false) && ok;
+    ok = RegisterOne(HK_CAL_GROW, 0, VK_OEM_PLUS, false) && ok;
+    ok = RegisterOne(HK_CAL_GROW_SHIFT, MOD_SHIFT, VK_OEM_PLUS, false) && ok;
+    ok = RegisterOne(HK_CAL_GROW_NUMPAD, 0, VK_ADD, false) && ok;
+    ok = RegisterOne(HK_CAL_COMPACT, 0, VK_HOME) && ok;
     ok = RegisterOne(HK_CAL_ENTER, 0, VK_RETURN) && ok;
     ok = RegisterOne(HK_CAL_ESCAPE, 0, VK_ESCAPE) && ok;
     return ok;
@@ -941,10 +968,13 @@ class App {
     saved_roi_ = roi_;
     saved_threshold_ = threshold_;
     mode_ = UiMode::kCalibrate;
-    RegisterCalibrationHotkeys();
+    const bool hotkeys_ok = RegisterCalibrationHotkeys();
+    ClampRoiToVirtualScreen();
     MoveRoiWindow();
     ShowWindow(roi_window_, SW_SHOWNOACTIVATE);
-    status_message_ = L"F9 校准：框住 ang: 后第一个 pitch 数字，不要框 ang: 或 yaw。";
+    status_message_ = hotkeys_ok
+                          ? L"F9 校准：-/小键盘-缩小，=/+/小键盘+放大，Home恢复72×18。"
+                          : L"F9 校准热键注册不完整；请关闭占用方向键或 +/- 的程序后重试。";
     UpdateOverlay();
   }
 
@@ -1127,10 +1157,33 @@ class App {
     roi_.x += move_x;
     roi_.y += move_y;
 
-    if (id == HK_CAL_CTRL_LEFT) roi_.w = std::max(24, roi_.w - 1);
-    if (id == HK_CAL_CTRL_RIGHT) roi_.w = std::min(240, roi_.w + 1);
-    if (id == HK_CAL_CTRL_UP) roi_.h = std::max(10, roi_.h - 1);
-    if (id == HK_CAL_CTRL_DOWN) roi_.h = std::min(80, roi_.h + 1);
+    if (id == HK_CAL_CTRL_LEFT) {
+      roi_ = arcassist::ResizeRoiCentered(roi_, -1, 0);
+    }
+    if (id == HK_CAL_CTRL_RIGHT) {
+      roi_ = arcassist::ResizeRoiCentered(roi_, 1, 0);
+    }
+    if (id == HK_CAL_CTRL_UP) {
+      roi_ = arcassist::ResizeRoiCentered(roi_, 0, -1);
+    }
+    if (id == HK_CAL_CTRL_DOWN) {
+      roi_ = arcassist::ResizeRoiCentered(roi_, 0, 1);
+    }
+    if (id == HK_CAL_SHRINK || id == HK_CAL_SHRINK_NUMPAD) {
+      roi_ = arcassist::ResizeRoiCentered(
+          roi_, -arcassist::kQuickResizeWidthStep,
+          -arcassist::kQuickResizeHeightStep);
+    }
+    if (id == HK_CAL_GROW || id == HK_CAL_GROW_SHIFT ||
+        id == HK_CAL_GROW_NUMPAD) {
+      roi_ = arcassist::ResizeRoiCentered(
+          roi_, arcassist::kQuickResizeWidthStep,
+          arcassist::kQuickResizeHeightStep);
+    }
+    if (id == HK_CAL_COMPACT) {
+      roi_ = arcassist::CompactRoiCentered(roi_);
+    }
+    ClampRoiToVirtualScreen();
     if (id == HK_CAL_THRESHOLD_UP) threshold_ = std::min(250, threshold_ + 5);
     if (id == HK_CAL_THRESHOLD_DOWN) threshold_ = std::max(120, threshold_ - 5);
     if (id == HK_CAL_ENTER) {
@@ -1145,6 +1198,14 @@ class App {
     }
     MoveRoiWindow();
     UpdateOverlay();
+  }
+
+  void ClampRoiToVirtualScreen() {
+    const int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    const int right = left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    const int bottom = top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    roi_ = arcassist::ClampRoiToBounds(roi_, left, top, right, bottom);
   }
 
   bool CanCapture() const {
@@ -1375,7 +1436,8 @@ class App {
     } else if (mode_ == UiMode::kCalibrate) {
       std::wostringstream cal;
       cal << L"ROI " << roi_.x << L"," << roi_.y << L"  " << roi_.w << L"×"
-          << roi_.h << L"  threshold=" << threshold_;
+          << roi_.h << L"  threshold=" << threshold_
+          << L"  [-]缩小 [=]放大 [Home]72×18";
       DrawLine(dc, 16, y, cal.str(), white, body_font);
       y += 28;
     } else if (armed_ && target_elevation_) {
