@@ -46,3 +46,12 @@
   - EXE SHA-256 `f9a1c9ca…`；artifact `ApexArcAssist-windows-x64`（161386 字节）
 - 回滚事务 `artifacts/angle-ruler/`（已在独立副本实测恢复 ecfcc7e）。
 - 剩余：用户 Windows 实机验收（F8/F9 交互、半透明可读性、CPU 零占用）。
+
+## UI 修复（2026-08-12，提交 7d526a7）
+
+- 位置：左上角 `(work.left+12, work.top+96)`。以用户 2560×1440 截图为参照实测：
+  HUD 文本块 y≈36..76（NAME 行 36–42，POS/ANG/VEL 行 46–76），面板顶部 y=96，
+  与 HUD 数字保持 20px 间距。
+- 布局：行高 30→38，每行距离/角度同基线排版；24px 粗体角度不再与下一行重叠。
+- 半透明：LWA_ALPHA 208→185，明显半透明。
+- Windows CI run `31625764845` 通过：EXE SHA-256 `d5b5a73d…`，artifact 161850 字节。
