@@ -77,12 +77,17 @@
 - CPU、工作集、GPU 引擎、FPS、帧时间和 READY 使用体验均未测量；按
   [`../PERFORMANCE_TEST.md`](../PERFORMANCE_TEST.md) 进行。
 
-## 发布状态与下一步
+## 发布状态
 
-- 开发根目录不是有效 Git worktree；唯一可提交树是 `build/publish-repo/`，当前仍在
-  `b2abeb3 Add resizable compact calibration ROI`，尚未包含自动 OCR 事务。
-- 发布前：创建 diff/快照/验证/rollback artifact，将经过比较的文件同步到发布树，在该树
-  重跑核心与文档检查，提交并 push。
-- push 后：仅手动触发 `workflow_dispatch` Windows CI；获得 run 日志前不声明 MSVC、PE
-  导入或 EXE artifact 成功。
-- 最后由用户按 Windows 验收清单验证真实画面与性能。
+- 已发布：`f133a1cf0ea4e4b4808a4085422737c141a4fd40`（提交 `f133a1c`），并包含完整
+  回滚事务 `artifacts/auto-hud-ocr/`（ROllback 已在独立基线副本验证）。
+- Windows CI（手动 `workflow_dispatch`，run `31610004758`）全部成功：
+  - `FORBIDDEN_API_SCAN_OK runtime_source=src,resources`
+  - `arc_core: 750 checks, 0 failures`；`BASELINE_OK distance=30.0000 high_arc=75.0000`
+  - `DOC_VERIFY_OK documents=14 core_checks=750 workflow=manual_only`
+  - `BUILT: D:\a\apex-G\apex-G\dist\ApexArcAssist.exe`
+  - `PE_IMPORT_SCAN_OK required=USER32.dll,GDI32.dll forbidden_gpu_network_video=none`
+  - EXE SHA-256 `79832129460f121783764f8cac039318f138507ba2e90d7dc6bfb31e67899888`
+  - artifact `ApexArcAssist-windows-x64`（245576 字节，2026-09-11 过期）
+- 已本地可验证的都验证了；剩下只有用户 Windows 实机（画面/性能/READY）待按
+  `PERFORMANCE_TEST.md` 验收。

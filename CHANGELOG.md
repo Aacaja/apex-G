@@ -3,6 +3,12 @@
 本文件仅记录已落地的源码与文档变更；Windows 实机行为、性能和 CI 结果以各次
 实际运行记录为准，不以本文替代验证证据。
 
+## 2026-08-12 — automatic `ANG:` pitch OCR hardening (`f133a1c`)
+
+Windows CI run `31610004758` 成功（MSVC 核心 750 checks、公式基线、文档检查、EXE 构建、
+PE 导入审计、SHA-256 `79832129…`）；artifact `ApexArcAssist-windows-x64` 可下载。
+用户 Windows 实机验收仍待进行。
+
 ## Unreleased — automatic `ANG:` pitch OCR hardening
 
 ### Added

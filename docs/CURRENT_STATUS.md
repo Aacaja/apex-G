@@ -1,6 +1,6 @@
 # 当前状态
 
-更新：2026-08-12（本地 OCR 事务完成，尚未发布）
+更新：2026-08-12（已发布并 Windows CI 通过）
 
 ## 已完成并本地验证
 
@@ -38,6 +38,7 @@
 
 ## 发布状态
 
-根目录是开发工作区，不是可写 Git worktree。唯一发布树是
-`build/publish-repo/`，目前仍停在 `b2abeb3`，尚未同步自动 OCR 代码、fixture、文档
-或本次事务证据。同步前必须比较清单、在发布树重跑测试，并保留回滚 artifact。
+已发布 `f133a1c`（private repo `Aacaja/apex-G`，`main`），Windows CI run
+`31610004758` 全绿：核心 750 checks、公式基线、文档检查、MSVC EXE、PE 导入审计、
+SHA-256 均通过；artifact 可下载。回滚事务见 `artifacts/auto-hud-ocr/`。
+剩余待用户 Windows 实机验收。
