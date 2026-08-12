@@ -42,8 +42,15 @@ using arcassist::HighArcElevationDegrees;
 
 constexpr wchar_t kOverlayClass[] = L"ApexArcAssistOverlay";
 constexpr wchar_t kTitle[] = L"Apex Arc Assist";
-constexpr int kOverlayWidth = 340;
-constexpr int kOverlayHeight = 286;
+// Panel geometry (physical pixels). Position: top-left, below the in-game
+// cl_showpos HUD block. Measured from the user's 2560x1440 pic.png: the HUD
+// text occupies y≈36..76, so the panel starts at y=96 with a 16px gap.
+constexpr int kOverlayWidth = 330;
+constexpr int kOverlayHeight = 352;
+constexpr int kOverlayMarginX = 12;
+constexpr int kOverlayMarginY = 96;
+constexpr int kRowHeight = 38;
+constexpr int kTableTop = 88;
 
 constexpr int HK_DISTANCE = 1;
 constexpr int HK_RULER = 2;
@@ -207,7 +214,7 @@ class App {
         nullptr, nullptr, instance_, this);
     if (!overlay_) return false;
     // Semi-transparent so game data behind the panel stays readable.
-    SetLayeredWindowAttributes(overlay_, 0, 208, LWA_ALPHA);
+    SetLayeredWindowAttributes(overlay_, 0, 185, LWA_ALPHA);
 
     PositionOverlay();
     if (!RegisterStaticHotkeys()) {
@@ -430,8 +437,9 @@ class App {
     if (!overlay_) return;
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-    const int x = std::max(work.left, work.right - kOverlayWidth - 14);
-    const int y = work.top + 14;
+    // Top-left, below the game HUD number block (see geometry comment above).
+    const int x = work.left + kOverlayMarginX;
+    const int y = work.top + kOverlayMarginY;
     SetWindowPos(overlay_, HWND_TOPMOST, x, y, kOverlayWidth, kOverlayHeight,
                  SWP_NOACTIVATE | (ruler_visible_ ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
   }
@@ -464,58 +472,56 @@ class App {
     const COLORREF muted = RGB(160, 170, 185);
 
     if (mode_ == kInput) {
-      DrawLine(dc, 16, 14, L"输入距离（1–60m）", amber, title_font_);
+      DrawLine(dc, 12, 12, L"输入距离（1–60m）", amber, title_font_);
       std::wstring text = L"距离：" + (text_input_.empty() ? L"_" : text_input_) +
                           L" m   [Enter]确认 [Esc]取消";
-      DrawLine(dc, 16, 52, text, white, body_font_);
+      DrawLine(dc, 12, 50, text, white, body_font_);
       EndPaint(hwnd, &paint);
       return;
     }
 
-    DrawLine(dc, 16, 12, L"高抛角度标尺", white, title_font_);
-    DrawLine(dc, 200, 17, L"F9 隐藏", muted, small_font_);
+    DrawLine(dc, 12, 12, L"高抛角度标尺", white, title_font_);
+    DrawLine(dc, 232, 18, L"F9 隐藏", muted, small_font_);
 
-    int y = 48;
+    int y = 50;
     if (last_distance_ > 0.0) {
       std::wostringstream current;
       current << L"当前目标  " << std::fixed << std::setprecision(1)
-              << last_distance_ << L"m  →  " << std::setprecision(1)
+              << last_distance_ << L"m → " << std::setprecision(1)
               << RulerAngle(last_distance_) << L"°";
-      DrawLine(dc, 16, y, current.str(), green, body_font_);
-      y += 30;
+      DrawLine(dc, 12, y, current.str(), green, body_font_);
     } else {
-      DrawLine(dc, 16, y, L"按 F8 输入当前距离", amber, body_font_);
-      y += 30;
+      DrawLine(dc, 12, y, L"按 F8 输入当前距离", amber, body_font_);
     }
 
-    // Ruler rows: distance on the left, big angle on the right.
-    const int row_y = y;
-    const int row_height = 30;
-    for (const auto& row : ruler_rows_) {
+    // Ruler rows: distance on the left, big angle on the right. One row per
+    // 38px keeps the 24px bold angle glyphs from overlapping the next row.
+    for (std::size_t i = 0; i < ruler_rows_.size(); ++i) {
+      const auto& row = ruler_rows_[i];
+      const int row_y = kTableTop + static_cast<int>(i) * kRowHeight;
       const bool active =
           last_distance_ > 0.0 &&
           std::fabs(row.distance - last_distance_) < 0.5;
       if (active) {
-        RECT highlight{8, row_y, kOverlayWidth - 8, row_y + row_height - 4};
+        RECT highlight{8, row_y, kOverlayWidth - 8, row_y + kRowHeight - 4};
         FillRect(dc, &highlight, highlight_brush_);
       }
       std::wostringstream distance_text;
       distance_text << std::fixed << std::setprecision(0) << row.distance
                     << L"m";
-      DrawLine(dc, 16, row_y + 5, distance_text.str(),
+      DrawLine(dc, 16, row_y + 9, distance_text.str(),
                active ? amber : white, body_font_);
       std::wostringstream angle_text;
       angle_text << std::fixed << std::setprecision(1) << row.angle << L"°";
-      DrawLine(dc, 130, row_y, angle_text.str(), active ? green : white,
+      DrawLine(dc, 118, row_y + 2, angle_text.str(), active ? green : white,
                ruler_font_);
       if (active) {
-        DrawLine(dc, 232, row_y + 10, L"← 当前", green, small_font_);
+        DrawLine(dc, 236, row_y + 13, L"← 当前", green, small_font_);
       }
-      y += row_height;
     }
 
-    DrawLine(dc, 16, kOverlayHeight - 28,
-             L"F8 输入距离   F9 显示/隐藏   Ctrl+Shift+Q 退出", muted,
+    DrawLine(dc, 12, kOverlayHeight - 30,
+             L"F8 输入距离  F9 显示/隐藏  Ctrl+Shift+Q 退出", muted,
              small_font_);
 
     HPEN border = CreatePen(PS_SOLID, 2, RGB(90, 120, 170));

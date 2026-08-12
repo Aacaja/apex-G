@@ -806,7 +806,7 @@
  
  #ifndef UNICODE
  #define UNICODE
-@@ -18,110 +20,56 @@
+@@ -18,110 +20,63 @@
  
  #include <windows.h>
  
@@ -853,8 +853,15 @@
 -constexpr int kNormW = 12;
 -constexpr int kNormH = 18;
 -constexpr std::uint32_t kTemplateMagic = 0x31544141U;  // AAT1
-+constexpr int kOverlayWidth = 340;
-+constexpr int kOverlayHeight = 286;
++// Panel geometry (physical pixels). Position: top-left, below the in-game
++// cl_showpos HUD block. Measured from the user's 2560x1440 pic.png: the HUD
++// text occupies y≈36..76, so the panel starts at y=96 with a 16px gap.
++constexpr int kOverlayWidth = 330;
++constexpr int kOverlayHeight = 352;
++constexpr int kOverlayMarginX = 12;
++constexpr int kOverlayMarginY = 96;
++constexpr int kRowHeight = 38;
++constexpr int kTableTop = 88;
  
 -constexpr UINT kFarIntervalMs = 200;       // 5 Hz
 -constexpr UINT kNearIntervalMs = 83;       // about 12 Hz
@@ -936,7 +943,7 @@
  }
  
  std::wstring WidenAscii(std::string_view text) {
-@@ -152,651 +100,93 @@
+@@ -152,651 +107,93 @@
    return WritePrivateProfileStringW(section, key, buffer, path.c_str()) != FALSE;
  }
  
@@ -1634,7 +1641,7 @@
        return false;
      }
  
-@@ -810,40 +200,22 @@
+@@ -810,40 +207,22 @@
      overlay_class.lpszClassName = kOverlayClass;
      if (!RegisterClassExW(&overlay_class)) return false;
  
@@ -1656,7 +1663,7 @@
      if (!overlay_) return false;
 -    SetLayeredWindowAttributes(overlay_, 0, 225, LWA_ALPHA);
 +    // Semi-transparent so game data behind the panel stays readable.
-+    SetLayeredWindowAttributes(overlay_, 0, 208, LWA_ALPHA);
++    SetLayeredWindowAttributes(overlay_, 0, 185, LWA_ALPHA);
  
 -    roi_window_ = CreateWindowExW(
 -        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE |
@@ -1680,7 +1687,7 @@
      return true;
    }
  
-@@ -859,22 +231,15 @@
+@@ -859,22 +238,15 @@
    void Shutdown() {
      if (shutdown_) return;
      shutdown_ = true;
@@ -1707,7 +1714,7 @@
      if (overlay_) {
        if (IsWindow(overlay_)) DestroyWindow(overlay_);
        overlay_ = nullptr;
-@@ -886,16 +251,16 @@
+@@ -886,16 +258,16 @@
    void ReleaseUiObjects() {
      if (title_font_) DeleteObject(title_font_);
      if (body_font_) DeleteObject(body_font_);
@@ -1728,7 +1735,7 @@
    }
  
    static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT message, WPARAM wparam,
-@@ -910,73 +275,18 @@
+@@ -910,73 +282,18 @@
      return app->HandleOverlayMessage(hwnd, message, wparam, lparam);
    }
  
@@ -1802,7 +1809,7 @@
        case WM_NCHITTEST:
          return HTTRANSPARENT;
        case WM_DESTROY:
-@@ -988,120 +298,49 @@
+@@ -988,120 +305,49 @@
    }
  
    void LoadConfig() {
@@ -1939,7 +1946,7 @@
    }
  
    void HandleHotkey(int id) {
-@@ -1109,208 +348,52 @@
+@@ -1109,207 +355,51 @@
        DestroyWindow(overlay_);
        return;
      }
@@ -2151,27 +2158,21 @@
 -      if (text_input_.empty()) text_input_.push_back(L'-');
 -    } else if (id == HK_TEXT_PLUS && mode_ == UiMode::kTrainLabel) {
 -      if (text_input_.empty()) text_input_.push_back(L'+');
--    } else if (id == HK_TEXT_BACK) {
--      if (!text_input_.empty()) text_input_.pop_back();
--    } else if (id == HK_TEXT_ESCAPE) {
+     } else if (id == HK_TEXT_BACK) {
+       if (!text_input_.empty()) text_input_.pop_back();
+     } else if (id == HK_TEXT_ESCAPE) {
 -      status_message_ = L"已取消。";
 -      EndTransientMode(false);
-+    } else if (id == HK_TEXT_BACK) {
-+      if (!text_input_.empty()) text_input_.pop_back();
-+    } else if (id == HK_TEXT_ESCAPE) {
 +      EndInput();
-+      return;
-+    } else if (id == HK_TEXT_ENTER) {
-+      CommitDistance();
        return;
--    } else if (id == HK_TEXT_ENTER) {
+     } else if (id == HK_TEXT_ENTER) {
 -      if (mode_ == UiMode::kDistance) CommitDistance();
 -      else CommitTemplateLearning();
--      return;
++      CommitDistance();
+       return;
      }
      UpdateOverlay();
-   }
-@@ -1325,449 +408,32 @@
+@@ -1325,451 +415,35 @@
          return;
        }
        distance = *parsed;
@@ -2618,21 +2619,24 @@
      SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
 -    const int x = std::max(work.left, work.right - kOverlayWidth - 18);
 -    const int y = work.top + 18;
-+    const int x = std::max(work.left, work.right - kOverlayWidth - 14);
-+    const int y = work.top + 14;
++    // Top-left, below the game HUD number block (see geometry comment above).
++    const int x = work.left + kOverlayMarginX;
++    const int y = work.top + kOverlayMarginY;
      SetWindowPos(overlay_, HWND_TOPMOST, x, y, kOverlayWidth, kOverlayHeight,
 -                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
--  }
--
++                 SWP_NOACTIVATE | (ruler_visible_ ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
+   }
+ 
 -  void MoveRoiWindow() {
 -    SetWindowPos(roi_window_, HWND_TOPMOST, roi_.x, roi_.y, roi_.w, roi_.h,
 -                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
 -    InvalidateRect(roi_window_, nullptr, TRUE);
-+                 SWP_NOACTIVATE | (ruler_visible_ ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
-   }
- 
+-  }
+-
    void UpdateOverlay() {
-@@ -1792,100 +458,73 @@
+     if (!overlay_) return;
+     InvalidateRect(overlay_, nullptr, FALSE);
+@@ -1792,100 +466,71 @@
      FillRect(dc, &rect, background_brush_);
      SetBkMode(dc, TRANSPARENT);
  
@@ -2650,10 +2654,10 @@
 -    const COLORREF muted = RGB(170, 179, 190);
 -    const COLORREF state_colour = ready_gate_.ready() ? green : amber;
 +    if (mode_ == kInput) {
-+      DrawLine(dc, 16, 14, L"输入距离（1–60m）", amber, title_font_);
++      DrawLine(dc, 12, 12, L"输入距离（1–60m）", amber, title_font_);
 +      std::wstring text = L"距离：" + (text_input_.empty() ? L"_" : text_input_) +
 +                          L" m   [Enter]确认 [Esc]取消";
-+      DrawLine(dc, 16, 52, text, white, body_font_);
++      DrawLine(dc, 12, 50, text, white, body_font_);
 +      EndPaint(hwnd, &paint);
 +      return;
 +    }
@@ -2663,10 +2667,10 @@
 -    else if (!armed_) headline += L"IDLE / 0 CAPTURE";
 -    else headline += ready_gate_.ready() ? L"READY" : L"ARMED";
 -    DrawLine(dc, 16, 12, headline, state_colour, title_font);
-+    DrawLine(dc, 16, 12, L"高抛角度标尺", white, title_font_);
-+    DrawLine(dc, 200, 17, L"F9 隐藏", muted, small_font_);
++    DrawLine(dc, 12, 12, L"高抛角度标尺", white, title_font_);
++    DrawLine(dc, 232, 18, L"F9 隐藏", muted, small_font_);
  
-     int y = 48;
+-    int y = 48;
 -    if (mode_ == UiMode::kDistance) {
 -      DrawLine(dc, 16, y, L"距离输入：" + (text_input_.empty() ? L"_" : text_input_) +
 -                                L" m",
@@ -2692,16 +2696,15 @@
 -             << L"°  目标 pitch " << TargetPitch() << L"°";
 -      DrawLine(dc, 16, y, target.str(), white, body_font);
 -      y += 27;
++    int y = 50;
 +    if (last_distance_ > 0.0) {
 +      std::wostringstream current;
 +      current << L"当前目标  " << std::fixed << std::setprecision(1)
-+              << last_distance_ << L"m  →  " << std::setprecision(1)
++              << last_distance_ << L"m → " << std::setprecision(1)
 +              << RulerAngle(last_distance_) << L"°";
-+      DrawLine(dc, 16, y, current.str(), green, body_font_);
-+      y += 30;
++      DrawLine(dc, 12, y, current.str(), green, body_font_);
 +    } else {
-+      DrawLine(dc, 16, y, L"按 F8 输入当前距离", amber, body_font_);
-+      y += 30;
++      DrawLine(dc, 12, y, L"按 F8 输入当前距离", amber, body_font_);
 +    }
  
 -      if (current_pitch_ && current_elevation_) {
@@ -2715,15 +2718,16 @@
 -                 body_font);
 -      } else {
 -        DrawLine(dc, 16, y, L"当前 pitch --  |  等待有效字形", amber, body_font);
-+    // Ruler rows: distance on the left, big angle on the right.
-+    const int row_y = y;
-+    const int row_height = 30;
-+    for (const auto& row : ruler_rows_) {
++    // Ruler rows: distance on the left, big angle on the right. One row per
++    // 38px keeps the 24px bold angle glyphs from overlapping the next row.
++    for (std::size_t i = 0; i < ruler_rows_.size(); ++i) {
++      const auto& row = ruler_rows_[i];
++      const int row_y = kTableTop + static_cast<int>(i) * kRowHeight;
 +      const bool active =
 +          last_distance_ > 0.0 &&
 +          std::fabs(row.distance - last_distance_) < 0.5;
 +      if (active) {
-+        RECT highlight{8, row_y, kOverlayWidth - 8, row_y + row_height - 4};
++        RECT highlight{8, row_y, kOverlayWidth - 8, row_y + kRowHeight - 4};
 +        FillRect(dc, &highlight, highlight_brush_);
        }
 -      y += 27;
@@ -2734,22 +2738,21 @@
 +      std::wostringstream distance_text;
 +      distance_text << std::fixed << std::setprecision(0) << row.distance
 +                    << L"m";
-+      DrawLine(dc, 16, row_y + 5, distance_text.str(),
++      DrawLine(dc, 16, row_y + 9, distance_text.str(),
 +               active ? amber : white, body_font_);
 +      std::wostringstream angle_text;
 +      angle_text << std::fixed << std::setprecision(1) << row.angle << L"°";
-+      DrawLine(dc, 130, row_y, angle_text.str(), active ? green : white,
++      DrawLine(dc, 118, row_y + 2, angle_text.str(), active ? green : white,
 +               ruler_font_);
 +      if (active) {
-+        DrawLine(dc, 232, row_y + 10, L"← 当前", green, small_font_);
++        DrawLine(dc, 236, row_y + 13, L"← 当前", green, small_font_);
 +      }
-+      y += row_height;
      }
  
 -    DrawLine(dc, 16, y, status_message_, state_colour, body_font);
 -    y += 27;
-+    DrawLine(dc, 16, kOverlayHeight - 28,
-+             L"F8 输入距离   F9 显示/隐藏   Ctrl+Shift+Q 退出", muted,
++    DrawLine(dc, 12, kOverlayHeight - 30,
++             L"F8 输入距离  F9 显示/隐藏  Ctrl+Shift+Q 退出", muted,
 +             small_font_);
  
 -    std::wostringstream ocr;
@@ -2786,7 +2789,7 @@
      EndPaint(hwnd, &paint);
    }
  
-@@ -1893,70 +532,25 @@
+@@ -1893,70 +538,25 @@
    bool initialized_ = false;
    bool shutdown_ = false;
    HWND overlay_ = nullptr;
