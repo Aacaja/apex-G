@@ -32,7 +32,6 @@
 ```text
 .github/workflows/windows-build.yml
 src/apex_arc_assist.cpp
-src/apex_hud_ocr.h
 src/arc_core.h
 resources/ApexArcAssist.rc
 resources/app.manifest
@@ -107,9 +106,9 @@ GitHub 网页上传时容易漏掉隐藏目录 `.github`，建议按此顺序：
 
 ```text
 FORBIDDEN_API_SCAN_OK runtime_source=src,resources
-arc_core: 750 checks, 0 failures
+arc_core: 287 checks, 0 failures
 BASELINE_OK distance=30.0000 high_arc=75.0000
-DOC_VERIFY_OK documents=14 core_checks=750 workflow=manual_only
+DOC_VERIFY_OK documents=14 core_checks=287 workflow=manual_only
 BUILT: ...\dist\ApexArcAssist.exe
 PE_IMPORT_SCAN_OK required=USER32.dll,GDI32.dll forbidden_gpu_network_video=none
 SHA256=...

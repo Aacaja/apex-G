@@ -1,98 +1,37 @@
-# PERFORMANCE_TEST — 性能预算与 A/B 测量协议
+# PERFORMANCE_TEST — 性能验收（角度标尺版）
 
-本文档给出**验收标准（P0）**、**可复现测量方法**与**结果记录模板**。所有数字与源码常量一致（src/apex_arc_assist.cpp）；测量对象为 MSVC 构建的 `dist/ApexArcAssist.exe`。
+本版本**没有任何屏幕采集**：进程在 IDLE 时阻塞于 `GetMessageW`，无定时器、
+无轮询、无 BitBlt。性能验收因此非常简单。
 
----
-
-## 1. 性能预算（验收标准）
+## 1. 预算（验收标准）
 
 | 项目 | 预算 | 对应实现 |
 |---|---|---|
-| IDLE / F6 暂停 / 距离输入 / F9 校准 | **零周期采集、零轮询**；任务管理器稳定后显示 **0.0%** | `CanCapture()` 门；`KillCaptureTimer()`；阻塞式 `GetMessageW()` |
-| F5 自动定位 / F8 开始输入 | 每块显示器**一次** `720×280` 上限的 `BitBlt`；同一 DIB 派生 150/160/170（及当前 F9）阈值掩码，成功后立即释放大 DIB；不是定时全屏 OCR | `AutoLocateApexHud()`；扫描结束后回到消息等待或小 ROI |
-| Shift+F5 手动补强 | 仅抓当前小 ROI **一次**，然后等待标签热键输入 | `BeginTemplateLearning()` |
-| ARMED 单样本采集+识别 | **中位数 ≤ 1.5ms，p95 ≤ 3ms** | `CaptureSurface::Grab()` 的单次 `BitBlt`+阈值；`RecognizePitch()`；哈希不变则复用解析 |
-| ARMED 默认占空比 | **≤ 12 次/秒**（仅靠近目标时） | 200ms 远处 5Hz；83ms ≤8° 内约 12Hz；333ms READY 3Hz；丢帧退避 250/500/1000ms；见 `DesiredInterval()` |
-| READY | ≤ 3 次/秒，**仅进入边缘一声**提示 | `kReadyIntervalMs=333`；`MessageBeep` 仅在 `ReadyEvent::kEntered` |
-| GPU | **零** GPU API/导入，GPU 引擎占用 **0%** | 仅链接 user32/gdi32；无 DXGI/D3D/WGC |
-| 内存 | 工作集 **< 10MB**，无第三方运行时/后台服务 | ARMED 小 DIB 通常约 5KB；F5/F8 的 `720×280×4` 临时 DIB 约 0.8MB，加 3–4 张约 0.2MB/张的瞬时二值掩码；定位后立即释放；/MT 静态 CRT |
-| 帧时间（你的 PC，A/B） | 三次 60 秒对照：**中位 FPS 差值 ≤ 1%**，**p95 帧时间差值 ≤ 0.5ms** | 见第 4 节协议 |
+| IDLE（未按任何键） | CPU 0.0%、GPU 0% | 无定时器；阻塞式 `GetMessageW` |
+| 标尺显示（F9 打开） | 打开瞬间一次重绘，之后零开销 | `WM_PAINT` 只画一次；无动画/无定时刷新 |
+| 输入距离（F8） | 仅热键处理 + 一次重绘 | 无采集 |
+| 内存 | 工作集 < 5MB | 无 DIB/位图缓存；/MT 静态 CRT |
+| 帧时间影响 | 不参与游戏帧循环；无任何后台线程/捕获 | — |
 
-自报指标（悬浮窗右下角实时显示，每秒刷新）：`CAP median/p95 us`（BitBlt+阈值）、`MATCH median/p95 us`（模板匹配或哈希复用）、`interval=…ms`、`hash-reuse=…`。**预算中的「采集+识别」= CAP + MATCH 两行之和**。
-
-## 2. 测量环境准备
-
-1. Windows 10/11 x64，开启 `cl_showpos 1`，使用你实际会玩的显示模式（包括只能使用的全屏）。先确认游戏画面中按 F8 后可找到 `ANG:`；若 GDI 抓不到独占全屏，必须如实记录“未找到 ANG:”而不是把该结果当作性能通过。
-2. 测试期间关闭其它悬浮工具（RTSS/Afterburner 画线除外，见第 4 节）与可能周期性干扰的进程（或至少记录其在运行）。
-3. 启动 `dist\ApexArcAssist.exe`，按 `F8`；悬浮窗应先显示自动找到的 `ANG:` token，再输入固定距离（如 40m）并 Enter 进入 ARMED。仅当自动定位失败时才使用 F9/Shift+F5 兜底。
-4. **稳定期**：每次切换状态后先等 60s 再开始记录；F5/F8 的一次扫描、同帧阈值掩码、模板构建、DC 创建不计入 ARMED 稳态。
-
-## 3. CPU / 内存 / GPU 测量
+## 2. 测量方法（Windows）
 
 ```powershell
-# CPU：60 秒采样（每 1s 一个点），记录平均值与最大值
 Get-Counter '\Process(ApexArcAssist*)\% Processor Time' -SampleInterval 1 -MaxSamples 60
-
-# 任务管理器核对：详情页 CPU 列在 IDLE/PAUSED 下稳定后应显示 0.0%
-# 工作集（MB）与私有内存：
 Get-Process ApexArcAssist | Select-Object WorkingSet64, PrivateMemorySize64
-
-# GPU 核对：任务管理器 → 性能 → GPU 引擎视图；或详情页「GPU」列，
-# IDLE/PAUSED/ARMED 全程应为 0%（本进程无任何 GPU API）
 ```
 
-各状态独立测一遍，至少 60s/状态：
+状态：IDLE 60s → 按 F9 显示 60s → 按 F8 输入一次 → 60s。任务管理器核对
+IDLE 下 CPU 稳定为 0.0%，GPU 引擎列 0%。
 
-| 状态 | 预期 CPU（60s 均值） | 预期 GPU | 说明 |
+## 3. 结果记录模板
+
+机器：____  分辨率/刷新率：____  状态：____
+
+| 指标 | 预算 | 实测 | 通过? |
 |---|---|---|---|
-| IDLE（启动后未输距离） | ~0.0% | 0% | 无定时器 |
-| PAUSED（F6） | ~0.0% | 0% | 无定时器；悬浮窗标题显示 `PAUSED / 0 CAPTURE` |
-| ARMED 远处（距目标 >8°） | 5 次/秒 × ≤1.5ms ≈ 极低 | 0% | 悬浮窗 `interval=200ms` |
-| ARMED 近处（≤8°） | 12 次/秒 × ≤1.5ms | 0% | `interval=83ms`；最重档位 |
-| READY | 3 次/秒 | 0% | `interval=333ms`；确认提示音仅响一次 |
-| OCR 丢失（故意框错） | 4→2→1Hz 递减 | 0% | `interval=250→500→1000ms` |
-
-> 任务管理器 CPU 列按核数归一化，单线程轻负载可能显示 0.x%；「归零」判定以 IDLE/PAUSED 下 60s 采样均值为准（应 <0.1%）。若想更精确，用 `Get-Counter` 的原始值。
-
-## 4. 帧时间 A/B 协议（用户实机验收）
-
-工具：PresentMon（`PresentMon.exe -process_name <game>.exe -captureall -stop_after 60`）或 CapFrameX（记录帧时间 CSV）。
-
-流程：
-
-1. **固定场景**：同一地图同一静止视角（不移动相机、无人机干扰），同一距离与 READY 状态；把 `cl_showpos` HUD 保留（游戏内真实使用条件）。
-2. **A 组（基线）**：不运行本工具，3 次 × 60s，记录中位 FPS 与 p95 帧时间。
-3. **B 组（对照）**：运行本工具并处于 **ARMED 近处档（最重档，83ms 采样）**，3 次 × 60s，同样记录。
-4. 计算：中位 FPS 差值 % = |B−A|/A；p95 帧时间差值 ms = |B_p95 − A_p95|。
-
-**通过条件（三次取最大差值）：中位 FPS 差值 ≤ 1%，p95 帧时间差值 ≤ 0.5ms。**
-
-附加检查：
-
-- READY 状态下帧时间曲线无周期性毛刺（3Hz 小 ROI 采样不应产生可感知节奏）。
-- 单独记录一次 F8 自动定位的耗时和峰值工作集；它是显式一次性操作，不应混入 ARMED 的每帧预算。
-- 验证「暂停即释放」：F6 后 CPU 60s 均值回落到与 IDLE 相同。
-- 验证「哈希复用」生效：视角静止时悬浮窗 `MATCH us` 应接近 0 且 `hash-reuse` 持续增长（证明不做重复模板匹配）。
-
-## 5. 结果记录模板
-
-机器：____  CPU：____  GPU：____  分辨率/刷新率：____  游戏版本：____  距离：____m  状态：____
-
-| 指标 | 预算 | A（基线） | B（本工具） | 最大差值 | 通过? |
-|---|---|---|---|---|---|
-| 中位 FPS（3×60s） | 差值 ≤1% | | | | |
-| p95 帧时间 ms | 差值 ≤0.5ms | | | | |
-| ARMED 单样本 CAP+MATCH 中位 | ≤1.5ms | — | 悬浮窗读数 | — | |
-| ARMED 单样本 CAP+MATCH p95 | ≤3ms | — | 悬浮窗读数 | — | |
-| 峰值采样率（近档） | ≤12/s | — | `interval=83ms` | — | |
-| READY 采样率 | ≤3/s | — | `interval=333ms` | — | |
-| IDLE/PAUSED CPU 60s 均值 | ≈0.0% | — | | — | |
-| 工作集 | <10MB | — | | — | |
-| GPU 引擎占用 | 0% | — | | — | |
-| READY 提示音 | 仅进入边缘一次 | — | 耳听/计数器 | — | |
-
-## 6. 复测与可复现性
-
-- 每次复测记录上文「机器」行全部参数；对比两轮结果差异 >20% 时，先检查背景进程与稳定期是否满足。
-- 自报 CAP/MATCH 为中位/p95 滚动窗（120 样本），读数为近似稳态；若需精确分布，用 PresentMon 无法覆盖本进程时，可临时用 `Get-Counter` 对 `% Processor Time` 高频采样交叉印证。
-- CI 只做构建与静态扫描（test.sh + dumpbin）；**性能验收必须在用户实机执行**，本文件即验收脚本。
+| IDLE CPU 60s 均值 | ≈0.0% | | |
+| 标尺显示 CPU 60s 均值 | ≈0.0% | | |
+| GPU 引擎占用 | 0% | | |
+| 工作集 | <5MB | | |
+| F9 显示/隐藏延迟 | <10ms（肉眼即时） | | |
+| 游戏帧时间影响 | 无（无采集/无钩子） | | |

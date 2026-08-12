@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parents[1]
-CORE_CHECKS = 750
+CORE_CHECKS = 287
 
 REQUIRED_FILES = (
     "AGENTS.md",
