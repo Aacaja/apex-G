@@ -5,9 +5,14 @@
 // grammar, glyph helpers, hash reuse, ROI geometry, READY hysteresis,
 // stale/invalid reset.
 
+#include "../src/apex_hud_ocr.h"
 #include "../src/arc_core.h"
 #include "../src/roi_geometry.h"
+#include "fixtures/apex_hud_glyphs_pic_mask.h"
+#include "fixtures/apex_hud_pic_2560x1440_mask.h"
+#include "fixtures/apex_hud_pic_multiline_mask.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -43,6 +48,7 @@ int g_failures = 0;
 using arcassist::BinaryGrid;
 using arcassist::ElevationStabilizer;
 using arcassist::GlyphTemplate;
+using arcassist::PitchSignContinuity;
 using arcassist::ReadyEvent;
 using arcassist::ReadyGate;
 using arcassist::RoiGeometry;
@@ -207,6 +213,33 @@ void TestSignModes() {
 }
 
 // -------------------------------------------------------------- grammar ---
+
+void TestPitchSignContinuity() {
+  PitchSignContinuity guard;
+  CHECK(guard.requires_neutral());
+  CHECK(!guard.Accept(52.25, false));  // no signed/zero anchor: fail closed
+  CHECK(guard.requires_neutral());
+  CHECK(guard.Accept(0.0, false));     // observed horizontal crossing
+  CHECK(!guard.Accept(2.25, false));   // could be clipped -52.25 suffix
+  CHECK(guard.requires_neutral());      // next high value needs visible +/-
+  CHECK(!guard.Accept(52.25, false));  // unsigned is still ambiguous
+  CHECK(guard.Accept(52.25, true));    // visible sign re-establishes direction
+  CHECK(guard.anchored_sign() == 1);
+  CHECK(!guard.Accept(-52.25, false)); // dropped/incorrect opposite sign
+  CHECK(guard.Accept(-52.25, true));   // visible signed token is trusted
+  CHECK(guard.anchored_sign() == -1);
+  CHECK(guard.Accept(-51.0, false));   // same trusted sign may omit '-' later
+
+  guard.Seed(-52.25);
+  CHECK(guard.anchored_sign() == -1);
+  CHECK(!guard.Accept(52.25, false));  // exact missing '-' failure mode
+  CHECK(guard.Accept(-52.25, false));
+  guard.RequireNeutral();
+  CHECK(guard.requires_neutral());
+  CHECK(!guard.Accept(-52.25, false));
+  CHECK(guard.Accept(-52.25, true));
+  CHECK(guard.anchored_sign() == -1);
+}
 
 void TestNumericGrammar() {
   using arcassist::ParsePitchToken;
@@ -428,6 +461,375 @@ void TestOcrPipeline() {
 }
 
 // ----------------------------------------------------------- stabilizer ---
+
+BinaryGrid FixtureGlyph(const apex_hud_glyph_fixture::Glyph& fixture) {
+  std::vector<const char*> rows;
+  for (const char* row : fixture.rows) {
+    if (row) rows.push_back(row);
+  }
+  BinaryGrid result;
+  for (const char* row : rows) {
+    result.width = std::max(result.width, static_cast<int>(std::strlen(row)));
+  }
+  result.height = static_cast<int>(rows.size());
+  result.pixels.assign(static_cast<std::size_t>(result.width) * result.height, 0);
+  for (int y = 0; y < result.height; ++y) {
+    for (int x = 0; rows[y][x] != '\0'; ++x) {
+      if (rows[y][x] == '#') result.Set(x, y, 1);
+    }
+  }
+  return result;
+}
+
+BinaryGrid ScreenshotHudScan() {
+  BinaryGrid scan;
+  scan.width = apex_hud_fixture::kWidth;
+  scan.height = apex_hud_fixture::kHeight;
+  scan.pixels.assign(apex_hud_fixture::kPixels.begin(),
+                     apex_hud_fixture::kPixels.end());
+  return scan;
+}
+
+// Place the redacted multi-line HUD back into the same 720x280 scan canvas
+// used at runtime. Scaling the whole canvas (rather than only a crop) keeps
+// nearest-neighbour phase identical to a real 2560→1920/3200 presentation.
+BinaryGrid MultilineHudScanCanvas() {
+  BinaryGrid scan;
+  scan.width = 720;
+  scan.height = 280;
+  scan.pixels.assign(static_cast<std::size_t>(scan.width) * scan.height, 0);
+  for (int y = 0; y < apex_hud_multiline_fixture::kHeight; ++y) {
+    for (int x = 0; x < apex_hud_multiline_fixture::kWidth; ++x) {
+      scan.Set(apex_hud_multiline_fixture::kX + x,
+               apex_hud_multiline_fixture::kY + y,
+               apex_hud_multiline_fixture::kPixels[
+                   static_cast<std::size_t>(y) *
+                       apex_hud_multiline_fixture::kWidth +
+                   x]);
+    }
+  }
+  return scan;
+}
+
+BinaryGrid CropGrid(const BinaryGrid& source, int x0, int y0, int width,
+                    int height) {
+  BinaryGrid result;
+  result.width = width;
+  result.height = height;
+  if (width <= 0 || height <= 0) return result;
+  result.pixels.assign(static_cast<std::size_t>(width) * height, 0);
+  for (int y = 0; y < height; ++y) {
+    for (int x = 0; x < width; ++x) result.Set(x, y, source.At(x0 + x, y0 + y));
+  }
+  return result;
+}
+
+BinaryGrid ScaleNearest(const BinaryGrid& source, int factor) {
+  BinaryGrid result;
+  if (factor <= 0 || source.width <= 0 || source.height <= 0) return result;
+  result.width = source.width * factor;
+  result.height = source.height * factor;
+  result.pixels.assign(static_cast<std::size_t>(result.width) * result.height, 0);
+  for (int y = 0; y < result.height; ++y) {
+    for (int x = 0; x < result.width; ++x) {
+      result.Set(x, y, source.At(x / factor, y / factor));
+    }
+  }
+  return result;
+}
+
+BinaryGrid ScaleNearestRatioPhase(const BinaryGrid& source, int numerator,
+                                  int denominator, int phase_x = 0,
+                                  int phase_y = 0) {
+  BinaryGrid result;
+  if (numerator <= 0 || denominator <= 0 || source.width <= 0 ||
+      source.height <= 0 || phase_x < 0 || phase_y < 0 ||
+      phase_x >= denominator || phase_y >= denominator) {
+    return result;
+  }
+  result.width = source.width * numerator / denominator;
+  result.height = source.height * numerator / denominator;
+  result.pixels.assign(static_cast<std::size_t>(result.width) * result.height, 0);
+  for (int y = 0; y < result.height; ++y) {
+    for (int x = 0; x < result.width; ++x) {
+      result.Set(x, y,
+                 source.At((x * denominator + phase_x) / numerator,
+                           (y * denominator + phase_y) / numerator));
+    }
+  }
+  return result;
+}
+
+BinaryGrid ScaleNearestRatio(const BinaryGrid& source, int numerator,
+                             int denominator) {
+  return ScaleNearestRatioPhase(source, numerator, denominator);
+}
+
+BinaryGrid TranslateGrid(const BinaryGrid& source, int dx, int dy) {
+  BinaryGrid result;
+  result.width = source.width;
+  result.height = source.height;
+  result.pixels.assign(static_cast<std::size_t>(result.width) * result.height,
+                       0);
+  for (int y = 0; y < result.height; ++y) {
+    for (int x = 0; x < result.width; ++x) {
+      result.Set(x, y, source.At(x - dx, y - dy));
+    }
+  }
+  return result;
+}
+
+void TestApexHudAutoOcr() {
+  const BinaryGrid screenshot = ScreenshotHudScan();
+  CHECK(screenshot.width == 240);
+  CHECK(screenshot.height == 55);
+  CHECK(screenshot.pixels.size() == 13200);
+  // Fixture keeps only the ANG label and first target token; all other
+  // screenshot pixels are cleared before the binary mask is committed.
+  CHECK(std::count(screenshot.pixels.begin(), screenshot.pixels.end(), 1) == 242);
+
+  const auto templates = arcassist::BuildApexHudTemplates();
+  CHECK(templates.size() >= 29);  // screenshot seeds plus generic fallbacks.
+  for (const auto& glyph : apex_hud_glyph_fixture::kGlyphs) {
+    const auto guess = arcassist::GuessApexHudGlyph(
+        FixtureGlyph(glyph), templates, "-+.0123456789");
+    CHECK(guess.value == glyph.id);
+    CHECK(guess.score >= 0.95);
+  }
+  const auto location = arcassist::LocateApexHudPitch(screenshot, templates);
+  CHECK(location.has_value());
+  if (location) {
+    CHECK(location->token == "-52.25");
+    CHECK(location->explicit_sign);
+    CHECK(location->x == 48);
+    CHECK(location->y == 24);
+    CHECK(location->width == 53);
+    CHECK(location->height == 13);
+    CHECK(location->confidence > 0.98);
+
+    const BinaryGrid pitch = CropGrid(screenshot, location->x, location->y,
+                                      location->width, location->height);
+    const auto recognition =
+        arcassist::RecognizeApexHudPitchToken(pitch, templates);
+    CHECK(recognition.valid);
+    CHECK(recognition.token == "-52.25");
+    CHECK(recognition.explicit_sign);
+    CHECK(recognition.fully_framed);
+    CHECK(arcassist::IsApexHudStrictPitchTrusted(recognition));
+    CHECK_NEAR(recognition.raw_angle, -52.25, 1e-12);
+    CHECK(recognition.confidence > 0.98);
+  }
+
+  // A compact 72x18 automatic ROI contains intentional padding. It must keep
+  // the full signed token, while a right-shifted crop that begins inside the
+  // token must fail the strict automatic trust gate rather than turn the
+  // suffix 2.25 into valid guidance.
+  const BinaryGrid padded_pitch = CropGrid(screenshot, 39, 22, 72, 18);
+  const auto padded_recognition =
+      arcassist::RecognizeApexHudPitchToken(padded_pitch, templates);
+  CHECK(padded_recognition.valid);
+  CHECK(padded_recognition.token == "-52.25");
+  CHECK(padded_recognition.explicit_sign);
+  CHECK(padded_recognition.fully_framed);
+  CHECK(arcassist::IsApexHudStrictPitchTrusted(padded_recognition));
+  const BinaryGrid right_shifted_pitch = CropGrid(screenshot, 56, 22, 72, 18);
+  const auto right_shifted_recognition =
+      arcassist::RecognizeApexHudPitchToken(right_shifted_pitch, templates);
+  CHECK(right_shifted_recognition.valid);
+  CHECK(right_shifted_recognition.token == "52.25");
+  CHECK(!right_shifted_recognition.explicit_sign);
+  CHECK(!arcassist::IsApexHudManualPitchTrusted(right_shifted_recognition));
+  CHECK(!arcassist::IsApexHudStrictPitchTrusted(right_shifted_recognition));
+  // Explicit F9/Shift+F5 recovery may deliberately frame the entire signed
+  // token tightly. It is complete and signed, so manual trust accepts it;
+  // the automatic path still rejects it for lack of surrounding padding.
+  const BinaryGrid tight_manual_pitch = CropGrid(screenshot, 48, 26, 49, 9);
+  const auto tight_manual_recognition =
+      arcassist::RecognizeApexHudPitchToken(tight_manual_pitch, templates);
+  CHECK(tight_manual_recognition.valid);
+  CHECK(tight_manual_recognition.token == "-52.25");
+  CHECK(tight_manual_recognition.explicit_sign);
+  CHECK(!tight_manual_recognition.fully_framed);
+  CHECK(arcassist::IsApexHudManualPitchTrusted(tight_manual_recognition));
+  CHECK(!arcassist::IsApexHudStrictPitchTrusted(tight_manual_recognition));
+  CHECK(arcassist::IsApexHudAutoPitchSignTrusted(0.0, false));
+  CHECK(!arcassist::IsApexHudAutoPitchSignTrusted(2.25, false));
+  CHECK(!arcassist::IsApexHudAutoPitchSignTrusted(-52.25, false));
+  CHECK(arcassist::IsApexHudAutoPitchSignTrusted(-52.25, true));
+
+  // HUD text can scale with resolution/HUD scale.  The locator normalizes
+  // glyph shape and uses relative spacing, so a 2x source-derived frame must
+  // still locate the exact same first ANG token.
+  const BinaryGrid doubled = ScaleNearest(screenshot, 2);
+  const auto doubled_location = arcassist::LocateApexHudPitch(doubled, templates);
+  CHECK(doubled_location.has_value());
+  if (doubled_location) {
+    CHECK(doubled_location->token == "-52.25");
+    // Padding is calculated from measured glyph height, so nearest-neighbour
+    // 2x scaling may round its outer edge by one physical pixel.  The located
+    // token and its normalized ROI geometry must remain proportional.
+    CHECK(std::abs(doubled_location->x - 2 * location->x) <= 1);
+    CHECK(std::abs(doubled_location->y - 2 * location->y) <= 1);
+    CHECK(std::abs(doubled_location->width - 2 * location->width) <= 2);
+    CHECK(std::abs(doubled_location->height - 2 * location->height) <= 2);
+    const BinaryGrid doubled_pitch =
+        CropGrid(doubled, doubled_location->x, doubled_location->y,
+                 doubled_location->width, doubled_location->height);
+    const auto doubled_recognition =
+        arcassist::RecognizeApexHudPitchToken(doubled_pitch, templates);
+    CHECK(doubled_recognition.valid);
+    CHECK(doubled_recognition.token == "-52.25");
+  }
+  // At 2x a pitch minus may also be two pixels tall. Removing the true ANG
+  // colon must still reject the label; a later sign cannot stand in for it.
+  BinaryGrid doubled_without_colon = doubled;
+  for (int y = 60; y <= 67; ++y) {
+    for (int x = 58; x <= 61; ++x) doubled_without_colon.Set(x, y, 0);
+  }
+  CHECK(!arcassist::LocateApexHudPitch(doubled_without_colon, templates)
+             .has_value());
+
+  // 2560x1440 -> 1920x1080 ratio: the label remains locatable even when
+  // the actual glyph strokes are reduced to roughly five pixels high.
+  const BinaryGrid three_quarters = ScaleNearestRatio(screenshot, 3, 4);
+  const auto small_location =
+      arcassist::LocateApexHudPitch(three_quarters, templates);
+  CHECK(small_location.has_value());
+  if (small_location) {
+    CHECK(small_location->token == "-52.25");
+    const BinaryGrid small_pitch =
+        CropGrid(three_quarters, small_location->x, small_location->y,
+                 small_location->width, small_location->height);
+    const auto small_recognition =
+        arcassist::RecognizeApexHudPitchToken(small_pitch, templates);
+    CHECK(small_recognition.valid);
+    CHECK(small_recognition.token == "-52.25");
+  }
+
+  // A target-only crop cannot reproduce false A/N/G sequences made by nearby
+  // POS/VEL data. This redacted, real multi-line HUD fixture does: after a
+  // whole-canvas scale it must locate and re-read only the true ANG field.
+  const BinaryGrid multiline = MultilineHudScanCanvas();
+  CHECK(multiline.width == 720 && multiline.height == 280);
+  CHECK(std::count(multiline.pixels.begin(), multiline.pixels.end(), 1) == 1409);
+  for (const auto& scale : {std::pair<int, int>{1, 1}, {5, 4}, {3, 2},
+                            {2, 1}, {3, 4}}) {
+    const BinaryGrid scaled_multiline =
+        ScaleNearestRatio(multiline, scale.first, scale.second);
+    const auto multiline_location =
+        arcassist::LocateApexHudPitch(scaled_multiline, templates);
+    CHECK(multiline_location.has_value());
+    if (!multiline_location) continue;
+    CHECK(multiline_location->token == "-52.25");
+    CHECK(multiline_location->explicit_sign);
+    const BinaryGrid multiline_pitch = CropGrid(
+        scaled_multiline, multiline_location->x, multiline_location->y,
+        multiline_location->width, multiline_location->height);
+    const auto multiline_recognition =
+        arcassist::RecognizeApexHudPitchToken(multiline_pitch, templates);
+    CHECK(multiline_recognition.valid);
+    CHECK(multiline_recognition.token == "-52.25");
+    CHECK(multiline_recognition.explicit_sign);
+    CHECK(multiline_recognition.fully_framed);
+    CHECK(arcassist::IsApexHudStrictPitchTrusted(multiline_recognition));
+    CHECK_NEAR(multiline_recognition.raw_angle, -52.25, 1e-12);
+  }
+
+  // F5/F8 may derive several masks from a single GDI frame. Identical and
+  // one-pixel-outline variants corroborate the same strict candidate; the
+  // helper returns the most confident matching threshold without recapturing.
+  const std::vector<BinaryGrid> corroborating_masks = {
+      multiline, multiline, TranslateGrid(multiline, 1, 0)};
+  const std::vector<int> corroborating_thresholds = {150, 160, 170};
+  const auto corroborated = arcassist::LocateApexHudPitchAcrossMasks(
+      corroborating_masks, corroborating_thresholds, templates);
+  CHECK(corroborated.has_value());
+  if (corroborated) {
+    CHECK(corroborated->location.token == "-52.25");
+    CHECK(corroborated->location.explicit_sign);
+    CHECK(corroborated->threshold == 150);
+  }
+  // Different successful locations/tokens are ambiguous threshold outcomes;
+  // automatic location must reject them rather than choosing a high score.
+  const BinaryGrid displaced = TranslateGrid(multiline, 0, 80);
+  const std::vector<BinaryGrid> conflicting_masks = {multiline, displaced};
+  const std::vector<int> conflicting_thresholds = {150, 170};
+  CHECK(!arcassist::LocateApexHudPitchAcrossMasks(
+      conflicting_masks, conflicting_thresholds, templates).has_value());
+  CHECK(!arcassist::LocateApexHudPitchAcrossMasks(
+      corroborating_masks, conflicting_thresholds, templates).has_value());
+
+  // Raster phase can change when the game/HUD scale changes. Every tested
+  // phase must either retain the exact signed pitch or fail closed; it must
+  // never lock a POS/VEL value or a dropped-sign high angle as a valid target.
+  for (const auto& scale : {std::pair<int, int>{3, 4}, {5, 4}, {3, 2}}) {
+    for (int phase_y = 0; phase_y < scale.second; ++phase_y) {
+      for (int phase_x = 0; phase_x < scale.second; ++phase_x) {
+        const BinaryGrid phased = ScaleNearestRatioPhase(
+            multiline, scale.first, scale.second, phase_x, phase_y);
+        const auto phased_location =
+            arcassist::LocateApexHudPitch(phased, templates);
+        CHECK(!phased_location ||
+              (phased_location->token == "-52.25" &&
+               phased_location->explicit_sign));
+        if (!phased_location) continue;
+        RoiGeometry automatic_roi{phased_location->x, phased_location->y,
+                                   phased_location->width,
+                                   phased_location->height};
+        automatic_roi = arcassist::ResizeRoiCentered(
+            automatic_roi,
+            std::max(0, arcassist::kMinRoiWidth - automatic_roi.w),
+            std::max(0, arcassist::kMinRoiHeight - automatic_roi.h));
+        const auto armed_recognition = arcassist::RecognizeApexHudPitchToken(
+            CropGrid(phased, automatic_roi.x, automatic_roi.y,
+                     automatic_roi.w, automatic_roi.h),
+            templates);
+        // The strict ARMED path has exactly two allowed outcomes at every
+        // modeled raster phase: the original signed pitch or OCR LOST.
+        CHECK(!arcassist::IsApexHudStrictPitchTrusted(armed_recognition) ||
+              (armed_recognition.token == "-52.25" &&
+               armed_recognition.explicit_sign));
+      }
+    }
+  }
+  // 1280x720-equivalent text is only about 3–4 pixels high in this screenshot.
+  // It is intentionally unsupported until it can be read without guessing.
+  CHECK(!arcassist::LocateApexHudPitch(
+      ScaleNearestRatio(multiline, 1, 2), templates).has_value());
+
+  // Source screenshot coordinates in this fixture: the first ANG minus is
+  // local x=52..55, y=30. If those four pixels disappear, locating the field
+  // is still useful, but the unsigned high-magnitude reading must not be used
+  // to reverse pitch direction. The sign continuity gate rejects it.
+  BinaryGrid missing_minus = screenshot;
+  for (int x = 52; x <= 55; ++x) missing_minus.Set(x, 30, 0);
+  const auto missing_location =
+      arcassist::LocateApexHudPitch(missing_minus, templates);
+  // Automatic location must not treat a high-angle token with a vanished
+  // leading '-' as directionally trustworthy. It is safer to ask for a new
+  // frame than to lock the opposite pitch.
+  CHECK(!missing_location.has_value());
+  const BinaryGrid missing_pitch = CropGrid(missing_minus, 54, 24, 47, 13);
+  const auto missing_recognition =
+      arcassist::RecognizeApexHudPitchToken(missing_pitch, templates);
+  CHECK(missing_recognition.valid);
+  CHECK(missing_recognition.token == "52.25");
+  CHECK(!missing_recognition.explicit_sign);
+  PitchSignContinuity sign_guard;
+  sign_guard.Seed(-52.25);
+  CHECK(!sign_guard.Accept(missing_recognition.raw_angle,
+                           missing_recognition.explicit_sign));
+
+  // Joining the minus bar to the first digit creates a tall component. It is
+  // not a valid Source minus and must be rejected instead of becoming -2.25.
+  BinaryGrid joined_minus = screenshot;
+  for (int x = 56; x <= 58; ++x) joined_minus.Set(x, 30, 1);
+  CHECK(!arcassist::LocateApexHudPitch(joined_minus, templates).has_value());
+
+  BinaryGrid blank = screenshot;
+  std::fill(blank.pixels.begin(), blank.pixels.end(), 0);
+  CHECK(!arcassist::LocateApexHudPitch(blank, templates).has_value());
+}
 
 void TestStabilizer() {
   ElevationStabilizer st;
@@ -701,12 +1103,14 @@ int main() {
   TestTolerance();
   TestPitchNormalization();
   TestSignModes();
+  TestPitchSignContinuity();
   TestNumericGrammar();
   TestExtractFromText();
   TestThresholdAndHash();
   TestSegmentation();
   TestNormalizeAndMatch();
   TestOcrPipeline();
+  TestApexHudAutoOcr();
   TestStabilizer();
   TestRoiGeometry();
   TestReadyEnter();

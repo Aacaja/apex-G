@@ -8,22 +8,24 @@
 
 | 项目 | 预算 | 对应实现 |
 |---|---|---|
-| IDLE / F6 暂停 / 距离输入 / F9 校准 / F5 标签输入 | **零屏幕采集、零轮询**（按下 F5 时仅抓一次用于学习）；任务管理器稳定后显示 **0.0%** | `CanCapture()` 门；`KillCaptureTimer()`；阻塞式 `GetMessageW()` |
+| IDLE / F6 暂停 / 距离输入 / F9 校准 | **零周期采集、零轮询**；任务管理器稳定后显示 **0.0%** | `CanCapture()` 门；`KillCaptureTimer()`；阻塞式 `GetMessageW()` |
+| F5 自动定位 / F8 开始输入 | 每块显示器**一次** `720×280` 上限的 `BitBlt`；同一 DIB 派生 150/160/170（及当前 F9）阈值掩码，成功后立即释放大 DIB；不是定时全屏 OCR | `AutoLocateApexHud()`；扫描结束后回到消息等待或小 ROI |
+| Shift+F5 手动补强 | 仅抓当前小 ROI **一次**，然后等待标签热键输入 | `BeginTemplateLearning()` |
 | ARMED 单样本采集+识别 | **中位数 ≤ 1.5ms，p95 ≤ 3ms** | `CaptureSurface::Grab()` 的单次 `BitBlt`+阈值；`RecognizePitch()`；哈希不变则复用解析 |
 | ARMED 默认占空比 | **≤ 12 次/秒**（仅靠近目标时） | 200ms 远处 5Hz；83ms ≤8° 内约 12Hz；333ms READY 3Hz；丢帧退避 250/500/1000ms；见 `DesiredInterval()` |
 | READY | ≤ 3 次/秒，**仅进入边缘一声**提示 | `kReadyIntervalMs=333`；`MessageBeep` 仅在 `ReadyEvent::kEntered` |
 | GPU | **零** GPU API/导入，GPU 引擎占用 **0%** | 仅链接 user32/gdi32；无 DXGI/D3D/WGC |
-| 内存 | 工作集 **< 10MB**，无第三方运行时/后台服务 | 新安装默认 72×18 单 DIB 约 5KB + 模板约百级×216bit；/MT 静态 CRT |
+| 内存 | 工作集 **< 10MB**，无第三方运行时/后台服务 | ARMED 小 DIB 通常约 5KB；F5/F8 的 `720×280×4` 临时 DIB 约 0.8MB，加 3–4 张约 0.2MB/张的瞬时二值掩码；定位后立即释放；/MT 静态 CRT |
 | 帧时间（你的 PC，A/B） | 三次 60 秒对照：**中位 FPS 差值 ≤ 1%**，**p95 帧时间差值 ≤ 0.5ms** | 见第 4 节协议 |
 
 自报指标（悬浮窗右下角实时显示，每秒刷新）：`CAP median/p95 us`（BitBlt+阈值）、`MATCH median/p95 us`（模板匹配或哈希复用）、`interval=…ms`、`hash-reuse=…`。**预算中的「采集+识别」= CAP + MATCH 两行之和**。
 
 ## 2. 测量环境准备
 
-1. Windows 10/11 x64，游戏**无边框窗口化**，`cl_showpos 1`，测试期间关闭其它悬浮工具（RTSS/Afterburner 画线除外，见第 4 节）。
-2. 关闭杀软实时扫描等可能周期性干扰的进程（或至少记录其在运行）。
-3. 启动 `dist\ApexArcAssist.exe`；F9 时若红框过大，按 Home 恢复 72×18 或按住 `-` 缩小，再完成校准、F5 训练、F8 输入固定距离（如 40m），让程序进入 ARMED。
-4. **稳定期**：每次切换状态后先等 60s 再开始记录（模板构建、DC 创建等一次性开销不在稳态内）。
+1. Windows 10/11 x64，开启 `cl_showpos 1`，使用你实际会玩的显示模式（包括只能使用的全屏）。先确认游戏画面中按 F8 后可找到 `ANG:`；若 GDI 抓不到独占全屏，必须如实记录“未找到 ANG:”而不是把该结果当作性能通过。
+2. 测试期间关闭其它悬浮工具（RTSS/Afterburner 画线除外，见第 4 节）与可能周期性干扰的进程（或至少记录其在运行）。
+3. 启动 `dist\ApexArcAssist.exe`，按 `F8`；悬浮窗应先显示自动找到的 `ANG:` token，再输入固定距离（如 40m）并 Enter 进入 ARMED。仅当自动定位失败时才使用 F9/Shift+F5 兜底。
+4. **稳定期**：每次切换状态后先等 60s 再开始记录；F5/F8 的一次扫描、同帧阈值掩码、模板构建、DC 创建不计入 ARMED 稳态。
 
 ## 3. CPU / 内存 / GPU 测量
 
@@ -67,7 +69,8 @@ Get-Process ApexArcAssist | Select-Object WorkingSet64, PrivateMemorySize64
 
 附加检查：
 
-- READY 状态下帧时间曲线无周期性毛刺（3Hz 采样不应产生可感知节奏）。
+- READY 状态下帧时间曲线无周期性毛刺（3Hz 小 ROI 采样不应产生可感知节奏）。
+- 单独记录一次 F8 自动定位的耗时和峰值工作集；它是显式一次性操作，不应混入 ARMED 的每帧预算。
 - 验证「暂停即释放」：F6 后 CPU 60s 均值回落到与 IDLE 相同。
 - 验证「哈希复用」生效：视角静止时悬浮窗 `MATCH us` 应接近 0 且 `hash-reuse` 持续增长（证明不做重复模板匹配）。
 

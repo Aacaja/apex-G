@@ -32,6 +32,7 @@
 ```text
 .github/workflows/windows-build.yml
 src/apex_arc_assist.cpp
+src/apex_hud_ocr.h
 src/arc_core.h
 resources/ApexArcAssist.rc
 resources/app.manifest
@@ -106,7 +107,9 @@ GitHub 网页上传时容易漏掉隐藏目录 `.github`，建议按此顺序：
 
 ```text
 FORBIDDEN_API_SCAN_OK runtime_source=src,resources
-arc_core: 520 checks, 0 failures
+arc_core: 750 checks, 0 failures
+BASELINE_OK distance=30.0000 high_arc=75.0000
+DOC_VERIFY_OK documents=14 core_checks=750 workflow=manual_only
 BUILT: ...\dist\ApexArcAssist.exe
 PE_IMPORT_SCAN_OK required=USER32.dll,GDI32.dll forbidden_gpu_network_video=none
 SHA256=...
@@ -167,15 +170,15 @@ Get-Content .\dependents.txt
 
 ## 首次运行顺序
 
-1. Apex 启动项加入 `+cl_showpos 1`。
-2. 游戏使用**无边框窗口化**。
-3. 运行 `ApexArcAssist.exe`。
-4. `F9`：若红框过大，按 `Home` 恢复 `72×18`，再按住 `-`/小键盘 `-` 缩小；`=`/`+` 可放大，方向键移动。让红框只框住 `ang:` 后第一个 pitch 数字，然后 Enter 保存。
-5. `F5`：原样输入当前 pitch 并 Enter；在多个角度重复学习常见数字。
-6. `F7`：若抬头时读数方向与默认不一致，切换符号约定。
-7. `F8`：输入 1–60m 距离并 Enter。
-8. 自己移动准星；进入 READY 后自己投掷。
-9. `F6`：暂停/恢复；暂停时为零屏幕采集。
+1. Apex 启动项加入 `+cl_showpos 1`，确认左上角出现 `NAME / POS / ANG / VEL`。
+2. 运行 `ApexArcAssist.exe`。可以先在你实际使用的全屏模式测试；前提是现有 GDI 路径确实能读到游戏 HUD。
+3. `F8`：程序会一次性自动扫描每块显示器左上角、找到 `ANG:` 后第一个 pitch，并在悬浮窗显示找到的 token。
+4. 输入 1–60m 距离并 Enter；**无需手输任何 pitch 数字**。
+5. `F7`：若抬头时读数方向与默认不一致，切换符号约定。
+6. 自己移动准星；进入 READY 后自己投掷。
+7. `F5`：仅在自动定位失败、HUD 移动或显示模式变化后，用于强制重新自动定位。
+8. 仍失败时才用 `F9` 手调 ROI；`Home` 恢复 `72×18`，`-` 缩小，`=`/`+` 放大。`Shift+F5` 是可选的人工模板补强。
+9. `F6`：暂停/恢复；暂停时为零周期屏幕采集。
 
 完整操作见 `README.md`，实机性能 A/B 验收见 `PERFORMANCE_TEST.md`。
 

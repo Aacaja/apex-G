@@ -11,9 +11,9 @@
 | # | 能力 | 实现与源码入口 | 边界说明 |
 |---|---|---|---|
 | A1 | 注册/注销全局热键（监听输入） | `RegisterHotKey` / `UnregisterHotKey`；见 `RegisterStaticHotkeys`、`RegisterTextHotkeys`、`RegisterCalibrationHotkeys` | 只**监听**，绝不**发送**；静态/文本热键使用 `MOD_NOREPEAT`，F9 校准移动/缩放键刻意允许按住连发；退出/模式切换时全部注销 |
-| A2 | 抓取桌面像素（用户校准的小 ROI） | `GetDC(nullptr)` + `CreateCompatibleDC` + `CreateDIBSection` + `BitBlt(SRCCOPY)`；见 `CaptureSurface` | 仅 `CanCapture()` 为真时周期采集；F5 仅单次采集；新安装默认 72×18，F9 可居中缩放并自动限制在虚拟桌面内；全程复用 1 屏幕 DC + 1 内存 DC + 1 top-down DIB |
-| A3 | 本地字形识别 | `SegmentGlyphs`、`NormalizeGlyph`、`OverlapScore`、`MatchScore`、`RecognizePitch` | 固定字形集 `-+.0123456789`；启动时一次性用 GDI 生成通用字体模板，另有内置 5×7 兜底与 F5 精确模板 |
-| A4 | 本地计算 | `HighArcElevationDegrees`、`ElevationToleranceDegrees`、`NormalizePitchDegrees`、`ElevationStabilizer`、`ReadyGate` | 纯 C++ 数学；3 样本中值稳定，单帧 >15° 跳变拒绝并需第二帧确认 |
+| A2 | 抓取桌面像素 | `GetDC(nullptr)` + `CreateCompatibleDC` + `CreateDIBSection` + `BitBlt(SRCCOPY)`；见 `CaptureSurface`、`AutoLocateApexHud` | ARMED 时仅周期抓自动定位/手调的小 ROI；F5/F8 是用户显式触发的一次扫描，每块显示器仅左上角最多 `720×280`，同一 DIB 在内存中派生多个阈值掩码，随后释放大 DIB；F9 可居中缩放并自动限制在虚拟桌面内；无连续全屏轮询 |
+| A3 | 本地字形识别 | `apex_hud_ocr.h`、`SegmentGlyphs`、`NormalizeGlyph`、`OverlapScore`、`MatchScore`、`RecognizePitch` | 固定字形集 `-+.0123456789`；自动定位 ROI 仅接受用户截图离线派生的 Apex HUD `ANG`/数字模板。非零值要求可见未粘连符号、完整 token/ROI 留边，阈值候选不一致或任何方向不可信时 fail-closed；系统字体、5×7 与 Shift+F5 精确模板仅用于手动路径；运行时不打开图片文件 |
+| A4 | 本地计算 | `HighArcElevationDegrees`、`ElevationToleranceDegrees`、`NormalizePitchDegrees`、`PitchSignContinuity`、`ElevationStabilizer`、`ReadyGate` | 纯 C++ 数学；符号连续性保护拒绝无符号非零/反号，3 样本中值稳定，单帧 >15° 跳变拒绝并需第二帧确认 |
 | A5 | 自己的置顶悬浮窗 | `CreateWindowExW(WS_EX_TOPMOST\|TOOLWINDOW\|NOACTIVATE\|LAYERED\|TRANSPARENT)`；`WM_NCHITTEST→HTTRANSPARENT` | 不抢焦点、点击穿透；纯 `TextOutW` 自绘 |
 | A6 | 提示音 | `MessageBeep(MB_OK)` | 仅 READY 进入边缘一次；F10 可关；无媒体管线 |
 | A7 | 本地配置/模板文件 | Profile 文件 API 与 `_wfopen_s/_fread/_fwrite`；见 `LoadConfig`、`SaveConfig`、`LearnedTemplateFile` | 只读写 exe 同目录的 INI 与 `ApexArcAssist.templates`；不写注册表 |
@@ -67,13 +67,15 @@ WSAStartup|WinHttp|InternetOpen|obs-websocket
 ## 5. 数据流与数据保留
 
 ```
-屏幕像素(仅用户校准的小框；新安装默认72×18) --BitBlt--> 32位DIB(~5KB) --阈值--> 二值网格
---FNV-1a哈希--> (哈希不变则复用上次解析, 不匹配模板) --模板匹配--> pitch 数值
---> 本地映射为仰角 --> READY门 --> 悬浮窗文本 + 一次MessageBeep
+F5/F8（用户显式一次请求）：每显示器左上角≤720×280 --BitBlt + GdiFlush--> 临时DIB(~0.8MB)
+--同帧阈值掩码(150/160/170/当前F9) + 本地ANG模板一致性--> 第一个完整pitch ROI --释放临时DIB
+ARMED：小ROI --BitBlt--> 小DIB(通常约5KB) --阈值--> 二值网格
+--FNV-1a哈希--> (哈希不变则复用上次解析, 不匹配模板) --模板匹配/符号连续性门
+--> pitch 数值或OCR LOST --> 本地映射为仰角 --> READY门 --> 悬浮窗文本 + 一次MessageBeep
 ```
 
-- 像素数据仅存在于进程内瞬时缓冲，每帧覆写；不落盘、不传输。
-- 落盘内容仅两类：`ApexArcAssist.ini`（ROI 坐标/阈值/距离/符号约定/声音，明文）与 `ApexArcAssist.templates`（字形 id + 12×18 二值网格）。**无日志、无截图文件、无网络报文。**
+- 像素数据仅存在于进程内瞬时 DIB/二值缓冲，每次覆写或释放；不落盘、不传输。
+- 落盘内容仅两类：`ApexArcAssist.ini`（ROI 坐标/阈值/色差上限/距离/符号约定/声音，明文）与 `ApexArcAssist.templates`（字形 id + 12×18 二值网格）。**无运行时截图文件、无日志、无网络报文。**
 - 悬浮窗 `WS_EX_TRANSPARENT` + `HTTRANSPARENT`：不拦截鼠标，不影响游戏输入焦点；`WS_EX_NOACTIVATE`：从不抢焦点。
 
 ## 6. 威胁模型与残留风险（诚实声明）
@@ -81,10 +83,10 @@ WSAStartup|WinHttp|InternetOpen|obs-websocket
 | 风险面 | 评估 |
 |---|---|
 | 全局热键 | 常驻监听面为 F5/F6/F7/F8/F9/F10/Ctrl+Shift+Q；距离/训练模式临时注册数字、符号、Enter/Esc，F9 模式临时注册方向键、`-/=/+`、小键盘加减、Home、PgUp/PgDn、Enter/Esc；模式退出即注销，注册冲突会提示 |
-| 屏幕捕获 | 只抓用户校准的矩形；但**该矩形内的一切桌面内容**都会进入进程并被二值化——请勿让 ROI 覆盖其它敏感窗口 |
+| 屏幕捕获 | ARMED 只抓小 ROI；F5/F8 会短暂读取每块显示器左上角 `720×280` 的桌面像素来找 `ANG:`。这些像素不落盘，但该范围内的一切可见内容会进入进程；请勿把敏感窗口放在该区域 |
 | 本地文件 | ini/模板与 exe 同目录，写入需要该目录权限；仅本进程写入 |
 | 恶意对抗 | 程序无任何代码执行路径可被外部触发（无网络、无插件、无命令行参数处理以外的行为）；唯一外部输入是热键与屏幕像素 |
-| 角度稳定 | App 已接入 `ElevationStabilizer`：3 样本中值、>15° 单帧拒绝、600ms 内相邻第二帧确认真实快速转向；无效样本会立即撤销 READY |
+| 角度稳定 | App 已接入 `PitchSignContinuity` 与 `ElevationStabilizer`：无符号非零、可疑反号/缺失/粘连符号、ROI 截断和多阈值冲突先拒绝为 OCR LOST；其后 3 样本中值、>15° 单帧拒绝、600ms 内相邻第二帧确认真实快速转向；无效样本会立即撤销 READY |
 
 ## 7. 复核清单（Reviewer 用）
 

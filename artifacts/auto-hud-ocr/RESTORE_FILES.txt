@@ -1,0 +1,11 @@
+.gitignore
+.github/workflows/windows-build.yml
+GITHUB_ACTIONS_GUIDE.md
+PERFORMANCE_TEST.md
+README.md
+SECURITY_BOUNDARY.md
+TASK_SPEC.md
+test.sh
+src/apex_arc_assist.cpp
+src/arc_core.h
+tests/test_arc_core.cpp

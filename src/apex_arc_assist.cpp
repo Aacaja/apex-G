@@ -18,6 +18,7 @@
 
 #include <windows.h>
 
+#include "apex_hud_ocr.h"
 #include "arc_core.h"
 #include "roi_geometry.h"
 
@@ -51,6 +52,10 @@ constexpr wchar_t kTitle[] = L"Apex Arc Assist";
 constexpr UINT_PTR kCaptureTimer = 1;
 constexpr int kOverlayWidth = 610;
 constexpr int kOverlayHeight = 226;
+// _WIN32_WINNT remains 0x0601 for broad build compatibility, where SDK
+// headers may omit this Win8.1+ message definition. The PerMonitorV2 manifest
+// remains authoritative for physical capture coordinates.
+constexpr UINT kWmDpiChanged = 0x02E0;
 constexpr int kNormW = 12;
 constexpr int kNormH = 18;
 constexpr std::uint32_t kTemplateMagic = 0x31544141U;  // AAT1
@@ -62,14 +67,20 @@ constexpr UINT kLost1IntervalMs = 250;     // 4 Hz
 constexpr UINT kLost2IntervalMs = 500;     // 2 Hz
 constexpr UINT kLost3IntervalMs = 1000;    // 1 Hz
 constexpr double kNearBandDeg = 8.0;
+// F5/F8 capture one GDI frame per monitor. The locator then evaluates these
+// screenshot-validated brightness masks from that same in-memory frame; the
+// current F9/manual threshold is appended below when it differs, without an
+// additional BitBlt or a background scan.
+constexpr std::array<int, 3> kAutoLocateReferenceThresholds = {150, 160, 170};
 
-constexpr int HK_TRAIN = 10;
+constexpr int HK_AUTO_LOCATE = 10;
 constexpr int HK_PAUSE = 11;
 constexpr int HK_SIGN = 12;
 constexpr int HK_DISTANCE = 13;
 constexpr int HK_CALIBRATE = 14;
 constexpr int HK_SOUND = 15;
 constexpr int HK_QUIT = 16;
+constexpr int HK_TRAIN = 17;
 constexpr int HK_TEXT_DIGIT_BASE = 100;
 constexpr int HK_TEXT_NUMPAD_BASE = 110;
 constexpr int HK_TEXT_PERIOD = 120;
@@ -106,6 +117,22 @@ using Roi = arcassist::RoiGeometry;
 
 enum class UiMode { kNormal, kDistance, kCalibrate, kTrainLabel };
 
+BOOL CALLBACK CollectMonitorRect(HMONITOR, HDC, LPRECT rect, LPARAM data) {
+  if (!rect || !data) return FALSE;
+  auto* monitors = reinterpret_cast<std::vector<RECT>*>(data);
+  monitors->push_back(*rect);
+  return TRUE;
+}
+
+std::wstring WidenAscii(std::string_view text) {
+  std::wstring result;
+  result.reserve(text.size());
+  for (char ch : text) {
+    result.push_back(static_cast<wchar_t>(static_cast<unsigned char>(ch)));
+  }
+  return result;
+}
+
 std::wstring ModuleSiblingPath(const wchar_t* leaf) {
   std::array<wchar_t, 32768> path{};
   const DWORD n = GetModuleFileNameW(nullptr, path.data(),
@@ -125,11 +152,67 @@ bool WriteIniInt(const std::wstring& path, const wchar_t* section,
   return WritePrivateProfileStringW(section, key, buffer, path.c_str()) != FALSE;
 }
 
+std::optional<double> ParseInvariantDecimal(std::wstring_view text) {
+  std::size_t begin = 0;
+  std::size_t end = text.size();
+  while (begin < end && (text[begin] == L' ' || text[begin] == L'\t')) ++begin;
+  while (end > begin && (text[end - 1] == L' ' || text[end - 1] == L'\t')) --end;
+  if (begin == end) return std::nullopt;
+
+  bool negative = false;
+  if (text[begin] == L'+' || text[begin] == L'-') {
+    negative = text[begin] == L'-';
+    ++begin;
+  }
+  if (begin == end) return std::nullopt;
+
+  double value = 0.0;
+  bool has_digits = false;
+  while (begin < end && text[begin] >= L'0' && text[begin] <= L'9') {
+    has_digits = true;
+    value = value * 10.0 + static_cast<double>(text[begin] - L'0');
+    ++begin;
+  }
+  if (begin < end && text[begin] == L'.') {
+    ++begin;
+    double divisor = 1.0;
+    while (begin < end && text[begin] >= L'0' && text[begin] <= L'9') {
+      has_digits = true;
+      divisor *= 10.0;
+      value += static_cast<double>(text[begin] - L'0') / divisor;
+      ++begin;
+    }
+  }
+  if (!has_digits || begin != end || !std::isfinite(value)) return std::nullopt;
+  return negative ? -value : value;
+}
+
+std::optional<std::wstring> FormatInvariantFixed6(double value) {
+  if (!std::isfinite(value) || std::fabs(value) > 1000000000000.0) {
+    return std::nullopt;
+  }
+  constexpr long long kScale = 1000000;
+  const long long scaled = static_cast<long long>(std::llround(value * kScale));
+  const bool negative = scaled < 0;
+  const unsigned long long magnitude = negative
+      ? static_cast<unsigned long long>(-(scaled + 1)) + 1ULL
+      : static_cast<unsigned long long>(scaled);
+  const unsigned long long whole = magnitude / kScale;
+  const unsigned long long fraction = magnitude % kScale;
+  std::wstring text = negative ? L"-" : L"";
+  text += std::to_wstring(whole);
+  text += L".";
+  const std::wstring fraction_text = std::to_wstring(fraction);
+  text.append(static_cast<std::size_t>(6) - fraction_text.size(), L'0');
+  text += fraction_text;
+  return text;
+}
+
 bool WriteIniDouble(const std::wstring& path, const wchar_t* section,
                     const wchar_t* key, double value) {
-  wchar_t buffer[64]{};
-  _snwprintf_s(buffer, _TRUNCATE, L"%.6f", value);
-  return WritePrivateProfileStringW(section, key, buffer, path.c_str()) != FALSE;
+  const auto text = FormatInvariantFixed6(value);
+  return text && WritePrivateProfileStringW(section, key, text->c_str(),
+                                             path.c_str()) != FALSE;
 }
 
 int ReadIniInt(const std::wstring& path, const wchar_t* section,
@@ -141,13 +224,12 @@ int ReadIniInt(const std::wstring& path, const wchar_t* section,
 double ReadIniDouble(const std::wstring& path, const wchar_t* section,
                      const wchar_t* key, double fallback) {
   wchar_t buffer[64]{};
-  wchar_t fallback_text[64]{};
-  _snwprintf_s(fallback_text, _TRUNCATE, L"%.6f", fallback);
-  GetPrivateProfileStringW(section, key, fallback_text, buffer,
-                           static_cast<DWORD>(std::size(buffer)), path.c_str());
-  wchar_t* end = nullptr;
-  const double value = std::wcstod(buffer, &end);
-  return end != buffer && std::isfinite(value) ? value : fallback;
+  const auto fallback_text = FormatInvariantFixed6(fallback);
+  GetPrivateProfileStringW(
+      section, key, fallback_text ? fallback_text->c_str() : L"0.000000",
+      buffer, static_cast<DWORD>(std::size(buffer)), path.c_str());
+  const auto value = ParseInvariantDecimal(buffer);
+  return value ? *value : fallback;
 }
 
 class QpcClock {
@@ -258,37 +340,83 @@ class CaptureSurface {
     return true;
   }
 
-  bool Grab(const Roi& roi, int threshold, BinaryGrid* out) {
-    if (!out || !Ensure(roi.w, roi.h)) return false;
-    if (!BitBlt(memory_dc_, 0, 0, roi.w, roi.h, screen_dc_, roi.x, roi.y,
-                SRCCOPY)) {
-      return false;
-    }
-
+  bool Grab(const Roi& roi, int threshold, int max_chroma_delta,
+            BinaryGrid* out) {
+    if (!out || !Capture(roi)) return false;
     out->width = roi.w;
     out->height = roi.h;
     out->pixels.assign(static_cast<std::size_t>(roi.w) * roi.h, 0);
     for (int y = 0; y < roi.h; ++y) {
       for (int x = 0; x < roi.w; ++x) {
         const std::size_t i = static_cast<std::size_t>(y) * roi.w + x;
-        const std::uint8_t b = bits_[4 * i + 0];
-        const std::uint8_t g = bits_[4 * i + 1];
-        const std::uint8_t r = bits_[4 * i + 2];
-        const int high = std::max({static_cast<int>(r), static_cast<int>(g),
-                                   static_cast<int>(b)});
-        const int low = std::min({static_cast<int>(r), static_cast<int>(g),
-                                  static_cast<int>(b)});
-        // cl_showpos text is bright and near-neutral. The second clause keeps
-        // fully white antialiasing even on slightly coloured backgrounds.
-        const bool bright = high >= threshold;
-        const bool neutral = (high - low) <= 92 || high >= 248;
-        out->pixels[i] = bright && neutral ? 1 : 0;
+        out->pixels[i] = IsHudPixel(i, threshold, max_chroma_delta) ? 1 : 0;
+      }
+    }
+    return true;
+  }
+
+  // Explicit F5/F8 locator helper: derive several masks from one captured
+  // frame. Normal ARMED capture deliberately continues to call Grab(), so its
+  // periodic work stays one tiny ROI and one chosen threshold.
+  bool GrabThresholdVariants(const Roi& roi, const int* thresholds,
+                             std::size_t threshold_count,
+                             int max_chroma_delta,
+                             std::vector<BinaryGrid>* out) {
+    if (!out || !thresholds || threshold_count == 0 || !Capture(roi)) {
+      return false;
+    }
+    out->clear();
+    out->resize(threshold_count);
+    for (auto& grid : *out) {
+      grid.width = roi.w;
+      grid.height = roi.h;
+      grid.pixels.assign(static_cast<std::size_t>(roi.w) * roi.h, 0);
+    }
+    for (int y = 0; y < roi.h; ++y) {
+      for (int x = 0; x < roi.w; ++x) {
+        const std::size_t i = static_cast<std::size_t>(y) * roi.w + x;
+        for (std::size_t n = 0; n < threshold_count; ++n) {
+          (*out)[n].pixels[i] =
+              IsHudPixel(i, thresholds[n], max_chroma_delta) ? 1 : 0;
+        }
       }
     }
     return true;
   }
 
  private:
+  bool Capture(const Roi& roi) {
+    if (!Ensure(roi.w, roi.h)) return false;
+    if (!BitBlt(memory_dc_, 0, 0, roi.w, roi.h, screen_dc_, roi.x, roi.y,
+                SRCCOPY)) {
+      return false;
+    }
+    // GDI can batch a BitBlt; flush before dereferencing CreateDIBSection
+    // bits so an occasional stale/empty mask cannot become OCR LOST.
+    return GdiFlush() != FALSE;
+  }
+
+  bool IsHudPixel(std::size_t i, int threshold,
+                  int max_chroma_delta) const {
+    if (!bits_ || threshold < 0 || threshold > 255 ||
+        max_chroma_delta < 0) {
+      return false;
+    }
+    const std::uint8_t b = bits_[4 * i + 0];
+    const std::uint8_t g = bits_[4 * i + 1];
+    const std::uint8_t r = bits_[4 * i + 2];
+    const int high = std::max({static_cast<int>(r), static_cast<int>(g),
+                               static_cast<int>(b)});
+    const int low = std::min({static_cast<int>(r), static_cast<int>(g),
+                              static_cast<int>(b)});
+    // Apex / Source cl_showpos is bright neutral text with a dark outline.
+    // The chroma bound rejects the blue sky/HUD background even when F5/F8
+    // tries a brighter alternate threshold on the same captured frame.
+    return high >= threshold &&
+           ((high - low) <= max_chroma_delta ||
+            (high >= 248 && low >= 190));
+  }
+
   HDC screen_dc_ = nullptr;
   HDC memory_dc_ = nullptr;
   HBITMAP bitmap_ = nullptr;
@@ -481,13 +609,47 @@ struct OcrResult {
   double raw_angle = 0.0;
   double normalized_pitch = 0.0;
   double confidence = 0.0;
+  bool explicit_sign = false;
   std::string glyphs;
   std::string token;
 };
 
 OcrResult RecognizePitch(const BinaryGrid& roi,
-                         const std::vector<GlyphTemplate>& templates) {
+                         const std::vector<GlyphTemplate>& apex_templates,
+                         const std::vector<GlyphTemplate>& templates,
+                         bool strict_apex_hud) {
   OcrResult result;
+
+  // Prefer screenshot-derived Apex / Source HUD templates.  The token path is
+  // strict and is what makes auto-located ANG values work without F5 labels.
+  const arcassist::ApexHudTokenRecognition apex =
+      arcassist::RecognizeApexHudPitchToken(roi, apex_templates);
+  // Automatic ROI samples require blank padding as well as a visible nonzero
+  // sign. Explicit F9/Shift+F5 recovery accepts a tightly framed, *complete*
+  // signed token, but never an unsigned nonzero crop/suffix.
+  const bool apex_trusted =
+      strict_apex_hud ? arcassist::IsApexHudStrictPitchTrusted(apex)
+                      : arcassist::IsApexHudManualPitchTrusted(apex);
+  if (apex_trusted) {
+    const double normalized = arcassist::NormalizePitchDegrees(apex.raw_angle);
+    if (std::fabs(normalized) <= arcassist::kMaxPitchDeg) {
+      result.valid = true;
+      result.raw_angle = apex.raw_angle;
+      result.normalized_pitch = normalized;
+      result.confidence = apex.confidence;
+      result.explicit_sign = apex.explicit_sign;
+      result.glyphs = apex.token;
+      result.token = apex.token;
+      return result;
+    }
+  }
+
+  // Do not let a broader generic matcher reinterpret an Apex-template token
+  // in the automatic path when strict framing/sign checks failed. Explicit
+  // F9/Shift+F5 recovery may continue to user-trained/common-font templates;
+  // its generic result below independently requires an explicit nonzero sign.
+  if (strict_apex_hud) return result;
+
   const std::vector<BinaryGrid> components = UsefulComponents(roi);
   if (components.empty() || components.size() > 16) return result;
 
@@ -507,6 +669,14 @@ OcrResult RecognizePitch(const BinaryGrid& roi,
   const double normalized = arcassist::NormalizePitchDegrees(*raw);
   if (std::fabs(normalized) > arcassist::kMaxPitchDeg) return result;
 
+  result.explicit_sign = !result.glyphs.empty() &&
+                         (result.glyphs[0] == '-' || result.glyphs[0] == '+');
+  // F9/Shift+F5 may use broader templates, but an unsigned nonzero result is
+  // still directionally ambiguous (and could be a clipped high-angle token).
+  if (!arcassist::IsApexHudAutoPitchSignTrusted(*raw,
+                                                 result.explicit_sign)) {
+    return {};
+  }
   result.valid = true;
   result.raw_angle = *raw;
   result.normalized_pitch = normalized;
@@ -586,13 +756,24 @@ class App {
       : ini_path_(ModuleSiblingPath(L"ApexArcAssist.ini")),
         learned_file_(ModuleSiblingPath(L"ApexArcAssist.templates")) {}
 
-  ~App() { ReleaseUiObjects(); }
+  ~App() { Shutdown(); }
 
   bool Initialize(HINSTANCE instance) {
     instance_ = instance;
     LoadConfig();
     ClampRoiToVirtualScreen();
-    templates_ = BuildWindowsFontTemplates();
+    apex_hud_templates_ = arcassist::BuildApexHudTemplates();
+    // The generic fallback must only classify numeric pitch glyphs. Keep ANG
+    // label templates isolated in apex_hud_templates_ for one-shot locating.
+    constexpr std::string_view kNumericGlyphs = "-+.0123456789";
+    for (const auto& item : apex_hud_templates_) {
+      if (kNumericGlyphs.find(item.id) != std::string_view::npos) {
+        templates_.push_back(item);
+      }
+    }
+    const std::vector<GlyphTemplate> windows_templates = BuildWindowsFontTemplates();
+    templates_.insert(templates_.end(), windows_templates.begin(),
+                      windows_templates.end());
     learned_file_.Load(&learned_templates_);
     templates_.insert(templates_.end(), learned_templates_.begin(),
                       learned_templates_.end());
@@ -661,6 +842,7 @@ class App {
       status_message_ = L"部分全局热键注册失败；请关闭占用相同按键的程序。";
     }
     ShowWindow(overlay_, SW_SHOWNOACTIVATE);
+    initialized_ = true;
     UpdateOverlay();
     return true;
   }
@@ -675,16 +857,28 @@ class App {
   }
 
   void Shutdown() {
+    if (shutdown_) return;
+    shutdown_ = true;
     KillCaptureTimer();
     UnregisterDynamicHotkeys();
     if (overlay_) {
-      for (int id : {HK_TRAIN, HK_PAUSE, HK_SIGN, HK_DISTANCE, HK_CALIBRATE,
-                     HK_SOUND, HK_QUIT}) {
+      for (int id : {HK_AUTO_LOCATE, HK_PAUSE, HK_SIGN, HK_DISTANCE,
+                     HK_CALIBRATE, HK_SOUND, HK_QUIT, HK_TRAIN}) {
         UnregisterHotKey(overlay_, id);
       }
     }
-    SaveConfig();
+    // Do not create/overwrite an INI if initialization stopped part-way
+    // through. A fully initialized session still persists its user settings.
+    if (initialized_) SaveConfig();
     capture_.Reset();
+    if (roi_window_) {
+      if (IsWindow(roi_window_)) DestroyWindow(roi_window_);
+      roi_window_ = nullptr;
+    }
+    if (overlay_) {
+      if (IsWindow(overlay_)) DestroyWindow(overlay_);
+      overlay_ = nullptr;
+    }
     ReleaseUiObjects();
   }
 
@@ -725,6 +919,7 @@ class App {
       SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
     }
     if (!app) return DefWindowProcW(hwnd, message, wparam, lparam);
+    if (message == WM_NCHITTEST) return HTTRANSPARENT;
     if (message == WM_PAINT) {
       PAINTSTRUCT paint{};
       HDC dc = BeginPaint(hwnd, &paint);
@@ -758,13 +953,28 @@ class App {
         HandleHotkey(static_cast<int>(wparam));
         return 0;
       case WM_DISPLAYCHANGE:
+        // Physical screen coordinates may have moved. Do not let a stale
+        // manual ROI silently keep sampling a different HUD/desktop region.
+        KillCaptureTimer();
         PositionOverlay();
         ClampRoiToVirtualScreen();
         if (mode_ == UiMode::kCalibrate) MoveRoiWindow();
         capture_.Reset();
         last_hash_.reset();
         last_recognition_ = {};
-        status_message_ = L"显示模式已变化；ROI 已限制在虚拟桌面内，建议按 F9 检查。";
+        auto_located_roi_ = false;
+        relocation_required_ = true;
+        sign_guard_.RequireNeutral();
+        ready_gate_.Reset();
+        status_message_ = L"显示模式已变化；请按 F5 重新自动定位 ANG:。";
+        UpdateOverlay();
+        return 0;
+      case kWmDpiChanged:
+        // PerMonitorV2 comes from the manifest. Capture coordinates are
+        // physical pixels already; only refresh this process's overlay
+        // placement. The user-configured physical-pixel ROI is unchanged.
+        PositionOverlay();
+        if (mode_ == UiMode::kCalibrate) MoveRoiWindow();
         UpdateOverlay();
         return 0;
       case WM_NCHITTEST:
@@ -788,14 +998,20 @@ class App {
     roi_.h = std::clamp(
         ReadIniInt(ini_path_, L"capture", L"roi_h", arcassist::kDefaultRoiHeight),
         arcassist::kMinRoiHeight, arcassist::kMaxRoiHeight);
-    threshold_ = std::clamp(ReadIniInt(ini_path_, L"capture", L"threshold", 205),
-                            120, 250);
+    threshold_ = std::clamp(
+        ReadIniInt(ini_path_, L"capture", L"threshold",
+                   arcassist::kApexHudDefaultThreshold),
+        120, 250);
     convention_ = ReadIniInt(ini_path_, L"general", L"up_is_positive", 0) != 0
                       ? PitchConvention::kUpIsPositive
                       : PitchConvention::kUpIsNegative;
     sound_ = ReadIniInt(ini_path_, L"general", L"sound", 1) != 0;
     last_distance_ = std::clamp(
         ReadIniDouble(ini_path_, L"general", L"last_distance", 30.0), 1.0, 60.0);
+    chroma_delta_ = std::clamp(
+        ReadIniInt(ini_path_, L"capture", L"chroma_delta",
+                   arcassist::kApexHudMaxChromaDelta),
+        16, 128);
   }
 
   void SaveConfig() const {
@@ -804,6 +1020,7 @@ class App {
     WriteIniInt(ini_path_, L"capture", L"roi_w", roi_.w);
     WriteIniInt(ini_path_, L"capture", L"roi_h", roi_.h);
     WriteIniInt(ini_path_, L"capture", L"threshold", threshold_);
+    WriteIniInt(ini_path_, L"capture", L"chroma_delta", chroma_delta_);
     WriteIniInt(ini_path_, L"general", L"up_is_positive",
                 convention_ == PitchConvention::kUpIsPositive ? 1 : 0);
     WriteIniInt(ini_path_, L"general", L"sound", sound_ ? 1 : 0);
@@ -819,7 +1036,8 @@ class App {
 
   bool RegisterStaticHotkeys() {
     bool ok = true;
-    ok = RegisterOne(HK_TRAIN, 0, VK_F5) && ok;
+    ok = RegisterOne(HK_AUTO_LOCATE, 0, VK_F5) && ok;
+    ok = RegisterOne(HK_TRAIN, MOD_SHIFT, VK_F5) && ok;
     ok = RegisterOne(HK_PAUSE, 0, VK_F6) && ok;
     ok = RegisterOne(HK_SIGN, 0, VK_F7) && ok;
     ok = RegisterOne(HK_DISTANCE, 0, VK_F8) && ok;
@@ -906,6 +1124,7 @@ class App {
                         : PitchConvention::kUpIsNegative;
       ready_gate_.Reset();
       stabilizer_.Reset();
+      sign_guard_.RequireNeutral();
       jump_candidate_.reset();
       current_pitch_.reset();
       current_elevation_.reset();
@@ -931,6 +1150,10 @@ class App {
       BeginCalibration();
       return;
     }
+    if (id == HK_AUTO_LOCATE) {
+      BeginAutoLocate();
+      return;
+    }
     if (id == HK_TRAIN) {
       BeginTemplateLearning();
       return;
@@ -945,22 +1168,28 @@ class App {
 
   void BeginDistanceEntry() {
     if (mode_ != UiMode::kNormal) {
+      status_message_ = L"已取消当前输入/校准。";
       EndTransientMode(false);
       return;
     }
     KillCaptureTimer();
+    const bool located = AutoLocateApexHud();
     mode_ = UiMode::kDistance;
     text_input_.clear();
     if (!RegisterTextHotkeys(false)) {
       status_message_ = L"距离输入热键注册不完整。";
+    } else if (located) {
+      status_message_ = L"已自动定位 ANG: " + WidenAscii(auto_locate_token_) +
+                        L"；输入 1–60 米，Enter 确认。";
     } else {
-      status_message_ = L"输入 1–60 米；Enter 确认，空 Enter 复用上次，Esc 取消。";
+      status_message_ = L"未自动定位，仍使用已有 ROI；输入 1–60 米，Enter 确认。";
     }
     UpdateOverlay();
   }
 
   void BeginCalibration() {
     if (mode_ != UiMode::kNormal) {
+      status_message_ = L"已取消当前输入/校准。";
       EndTransientMode(false);
       return;
     }
@@ -978,18 +1207,36 @@ class App {
     UpdateOverlay();
   }
 
+  void BeginAutoLocate() {
+    if (mode_ != UiMode::kNormal) {
+      status_message_ = L"已取消当前输入/校准。";
+      EndTransientMode(false);
+      return;
+    }
+    KillCaptureTimer();
+    if (AutoLocateApexHud()) {
+      status_message_ = L"已自动定位 ANG: " + WidenAscii(auto_locate_token_) +
+                        L"；可直接按 F8 输入距离。";
+    } else {
+      status_message_ = L"未找到 ANG:；请确认 cl_showpos 1，或按 F9 手动校准。";
+    }
+    UpdateOverlay();
+    ScheduleCapture();
+  }
+
   void BeginTemplateLearning() {
     if (mode_ != UiMode::kNormal) {
+      status_message_ = L"已取消当前输入/校准。";
       EndTransientMode(false);
       return;
     }
     KillCaptureTimer();
     BinaryGrid snapshot;
     const std::int64_t start = clock_.NowTicks();
-    const bool grabbed = capture_.Grab(roi_, threshold_, &snapshot);
+    const bool grabbed = capture_.Grab(roi_, threshold_, chroma_delta_, &snapshot);
     capture_stats_.Add(clock_.ToMicroseconds(clock_.NowTicks() - start));
     if (!grabbed) {
-      status_message_ = L"F5 截取失败；请使用无边框模式并检查 ROI。";
+      status_message_ = L"Shift+F5 截取失败；请按 F5 自动定位，或检查 ROI。";
       ScheduleCapture();
       UpdateOverlay();
       return;
@@ -997,7 +1244,7 @@ class App {
     pending_training_components_ = UsefulComponents(snapshot);
     if (pending_training_components_.empty() ||
         pending_training_components_.size() > 8) {
-      status_message_ = L"F5 未分割出 1–8 个有效字形；请先按 F9 缩紧 ROI/调阈值。";
+      status_message_ = L"Shift+F5 未分割出 1–8 个有效字形；请先按 F5 自动定位。";
       ScheduleCapture();
       UpdateOverlay();
       return;
@@ -1005,7 +1252,7 @@ class App {
     mode_ = UiMode::kTrainLabel;
     text_input_.clear();
     RegisterTextHotkeys(true);
-    status_message_ = L"已单次截取字形；请原样输入屏幕上的 pitch（含负号和小数点）后 Enter。";
+    status_message_ = L"手动补强：输入当前 pitch（含负号和小数点）后 Enter。";
     UpdateOverlay();
   }
 
@@ -1016,6 +1263,11 @@ class App {
         roi_ = saved_roi_;
         threshold_ = saved_threshold_;
       } else {
+        auto_located_roi_ = false;
+        // A user explicitly confirmed a newly calibrated physical ROI after a
+        // display change, so it is safe to resume the manual OCR path.
+        relocation_required_ = false;
+        sign_guard_.RequireNeutral();
         SaveConfig();
         capture_.Reset();
         last_hash_.reset();
@@ -1066,14 +1318,13 @@ class App {
   void CommitDistance() {
     double distance = last_distance_;
     if (!text_input_.empty()) {
-      wchar_t* end = nullptr;
-      distance = std::wcstod(text_input_.c_str(), &end);
-      if (end == text_input_.c_str() || *end != L'\0' ||
-          !std::isfinite(distance) || distance < 1.0 || distance > 60.0) {
+      const auto parsed = ParseInvariantDecimal(text_input_);
+      if (!parsed || *parsed < 1.0 || *parsed > 60.0) {
         status_message_ = L"距离无效：请输入 1–60 米。";
         UpdateOverlay();
         return;
       }
+      distance = *parsed;
     }
     const auto angle = arcassist::HighArcElevationDegrees(distance);
     if (!angle) {
@@ -1086,7 +1337,6 @@ class App {
     target_elevation_ = *angle;
     tolerance_ = arcassist::ElevationToleranceDegrees(distance);
     armed_ = true;
-    paused_ = false;
     current_pitch_.reset();
     current_elevation_.reset();
     stabilizer_.Reset();
@@ -1095,7 +1345,13 @@ class App {
     lost_streak_ = 0;
     ready_gate_.Reset();
     SaveConfig();
-    status_message_ = L"目标已装定；仅在此状态采集小 ROI。F6 可立即暂停。";
+    status_message_ = relocation_required_
+                          ? L"目标已装定；显示模式变化后请先按 F5 重定位。"
+                          : (paused_
+                                 ? L"目标已装定；仍处于暂停，F6 恢复后才采集。"
+                                 : (auto_located_roi_
+                                        ? L"目标已装定；已自动锁定 ANG: 小 ROI。F6 可暂停。"
+                                        : L"目标已装定；仅在此状态采集小 ROI。F6 可立即暂停。"));
     EndTransientMode(true);
   }
 
@@ -1119,6 +1375,11 @@ class App {
       UpdateOverlay();
       return;
     }
+    if (learned_templates_.size() + label.size() > 512) {
+      status_message_ = L"手动模板已达 512 条上限；删除 ApexArcAssist.templates 后可重建。";
+      UpdateOverlay();
+      return;
+    }
     for (std::size_t i = 0; i < label.size(); ++i) {
       if (std::string_view("-+.0123456789").find(label[i]) ==
           std::string_view::npos) {
@@ -1131,6 +1392,18 @@ class App {
       learned_templates_.push_back(item);
       templates_.push_back(std::move(item));
     }
+    auto_located_roi_ = false;  // Shift+F5 explicitly opts into learned OCR.
+    // The user just captured and labeled a new physical ROI, so this is also
+    // an explicit recovery after a display-mode change.
+    relocation_required_ = false;
+    const double normalized_label = arcassist::NormalizePitchDegrees(*raw);
+    if (!label.empty() && (label[0] == '-' || label[0] == '+' ||
+                           std::fabs(normalized_label) <=
+                               arcassist::kPitchSignNeutralBandDeg)) {
+      sign_guard_.Seed(normalized_label);
+    } else {
+      sign_guard_.RequireNeutral();
+    }
     // Force the next sample through the classifier so newly learned templates
     // take effect even when the captured pixels have not changed.
     last_hash_.reset();
@@ -1138,7 +1411,7 @@ class App {
     if (!learned_file_.Save(learned_templates_)) {
       status_message_ = L"模板已加入本次运行，但保存失败（检查目录写权限）。";
     } else {
-      status_message_ = L"精确字形模板已保存；可在不同角度重复 F5 补齐数字。";
+      status_message_ = L"手动补强模板已保存；通常无需重复 Shift+F5。";
     }
     EndTransientMode(true);
   }
@@ -1187,7 +1460,7 @@ class App {
     if (id == HK_CAL_THRESHOLD_UP) threshold_ = std::min(250, threshold_ + 5);
     if (id == HK_CAL_THRESHOLD_DOWN) threshold_ = std::max(120, threshold_ - 5);
     if (id == HK_CAL_ENTER) {
-      status_message_ = L"ROI/阈值已保存；建议立刻按 F5 学习当前字形。";
+      status_message_ = L"ROI/阈值已保存；下次 F8 会自动重新定位 ANG:。";
       EndTransientMode(true);
       return;
     }
@@ -1208,8 +1481,111 @@ class App {
     roi_ = arcassist::ClampRoiToBounds(roi_, left, top, right, bottom);
   }
 
+  bool AutoLocateApexHud() {
+    std::vector<RECT> monitors;
+    EnumDisplayMonitors(nullptr, nullptr, &CollectMonitorRect,
+                        reinterpret_cast<LPARAM>(&monitors));
+    if (monitors.empty()) {
+      const int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+      const int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+      monitors.push_back({left, top,
+                          left + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                          top + GetSystemMetrics(SM_CYVIRTUALSCREEN)});
+    }
+
+    // cl_showpos is at the upper-left of the game monitor.  This is a
+    // one-shot, bounded scan only when F5/F8 asks for it; normal ARMED capture
+    // immediately returns to the much smaller located pitch ROI.
+    constexpr int kAutoScanMaxWidth = 720;
+    constexpr int kAutoScanMaxHeight = 280;
+    std::vector<int> auto_thresholds(
+        kAutoLocateReferenceThresholds.begin(),
+        kAutoLocateReferenceThresholds.end());
+    // Preserve a user-calibrated/dim-HUD threshold as one more candidate. It
+    // uses the same frame and current chroma setting, so it cannot turn F5/F8
+    // into repeated capture or silently discard the user's F9 recovery work.
+    if (std::find(auto_thresholds.begin(), auto_thresholds.end(), threshold_) ==
+        auto_thresholds.end()) {
+      auto_thresholds.push_back(threshold_);
+    }
+    std::optional<arcassist::ApexHudThresholdLocation> best;
+    Roi best_scan{};
+    for (const RECT& monitor : monitors) {
+      const int monitor_width = monitor.right - monitor.left;
+      const int monitor_height = monitor.bottom - monitor.top;
+      const int width = std::min(kAutoScanMaxWidth, monitor_width);
+      const int height = std::min(kAutoScanMaxHeight, monitor_height);
+      if (width < 32 || height < 20) continue;
+
+      const Roi scan{monitor.left, monitor.top, width, height};
+      std::vector<BinaryGrid> masks;
+      const bool grabbed = capture_.GrabThresholdVariants(
+          scan, auto_thresholds.data(), auto_thresholds.size(), chroma_delta_,
+          &masks);
+      if (!grabbed) {
+        capture_.Reset();
+        continue;
+      }
+      const auto found = arcassist::LocateApexHudPitchAcrossMasks(
+          masks, auto_thresholds, apex_hud_templates_);
+      if (found && (!best ||
+                    found->location.confidence > best->location.confidence)) {
+        best = found;
+        best_scan = scan;
+      }
+      // Scan each monitor independently, then discard this larger DIB. The
+      // winning candidate below is only coordinates/text, never pixel data.
+      capture_.Reset();
+    }
+    if (!best) {
+      // Keep a previously automatic ROI on the strict Apex path. A transient
+      // failed re-scan must yield OCR LOST rather than silently falling back
+      // to a generic template over an old field. A manual/unknown ROI remains
+      // available through the documented F9 / Shift+F5 fallback.
+      if (!auto_located_roi_) sign_guard_.RequireNeutral();
+      return false;
+    }
+
+    Roi located{best_scan.x + best->location.x,
+                best_scan.y + best->location.y, best->location.width,
+                best->location.height};
+    if (located.w < arcassist::kMinRoiWidth ||
+        located.h < arcassist::kMinRoiHeight) {
+      located = arcassist::ResizeRoiCentered(
+          located, std::max(0, arcassist::kMinRoiWidth - located.w),
+          std::max(0, arcassist::kMinRoiHeight - located.h));
+    }
+    roi_ = located;
+    ClampRoiToVirtualScreen();
+    threshold_ = best->threshold;
+    auto_locate_confidence_ = best->location.confidence;
+    auto_locate_token_ = best->location.token;
+    auto_located_roi_ = true;
+    relocation_required_ = false;
+    const auto located_pitch =
+        arcassist::ParsePitchToken(best->location.token);
+    if (located_pitch && arcassist::IsApexHudAutoPitchSignTrusted(
+                             *located_pitch, best->location.explicit_sign)) {
+      sign_guard_.Seed(arcassist::NormalizePitchDegrees(*located_pitch));
+    } else {
+      sign_guard_.RequireNeutral();
+    }
+    ++auto_locate_successes_;
+    last_hash_.reset();
+    last_recognition_ = {};
+    ready_gate_.Reset();
+    lost_streak_ = 0;
+    stabilizer_.Reset();
+    jump_candidate_.reset();
+    current_pitch_.reset();
+    current_elevation_.reset();
+    SaveConfig();
+    return true;
+  }
+
   bool CanCapture() const {
-    return overlay_ && mode_ == UiMode::kNormal && armed_ && !paused_;
+    return overlay_ && mode_ == UiMode::kNormal && armed_ && !paused_ &&
+           !relocation_required_;
   }
 
   void KillCaptureTimer() {
@@ -1243,7 +1619,7 @@ class App {
     }
     BinaryGrid binary;
     const std::int64_t capture_start = clock_.NowTicks();
-    const bool grabbed = capture_.Grab(roi_, threshold_, &binary);
+    const bool grabbed = capture_.Grab(roi_, threshold_, chroma_delta_, &binary);
     capture_stats_.Add(clock_.ToMicroseconds(clock_.NowTicks() - capture_start));
     const double now_ms = clock_.ToMilliseconds(clock_.NowTicks());
 
@@ -1259,14 +1635,24 @@ class App {
       result = last_recognition_;
       hash_reuses_++;
     } else {
-      result = RecognizePitch(binary, templates_);
+      result = RecognizePitch(binary, apex_hud_templates_, templates_,
+                              auto_located_roi_);
       last_recognition_ = result;
       last_hash_ = hash;
     }
     ocr_stats_.Add(clock_.ToMicroseconds(clock_.NowTicks() - ocr_start));
 
     if (!result.valid) {
-      OnInvalidSample(now_ms, L"OCR LOST：按 F9 缩紧 ROI，再用 F5 学习字形。", false);
+      OnInvalidSample(now_ms,
+                      L"OCR LOST：先按 F5 自动重定位；仍失败再按 F9 或 Shift+F5。",
+                      false);
+      return;
+    }
+
+    if (!sign_guard_.Accept(result.normalized_pitch, result.explicit_sign)) {
+      OnInvalidSample(
+          now_ms,
+          L"OCR 符号不可信：等待带 +/- 的读数或经过 0° 后再继续。", false);
       return;
     }
 
@@ -1369,6 +1755,7 @@ class App {
   }
 
   void PositionOverlay() {
+    if (!overlay_) return;
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
     const int x = std::max(work.left, work.right - kOverlayWidth - 18);
@@ -1429,7 +1816,7 @@ class App {
       y += 28;
     } else if (mode_ == UiMode::kTrainLabel) {
       std::wostringstream train;
-      train << L"F5 字形训练：检测 " << pending_training_components_.size()
+      train << L"Shift+F5 手动补强：检测 " << pending_training_components_.size()
             << L" 个，标签 " << (text_input_.empty() ? L"_" : text_input_);
       DrawLine(dc, 16, y, train.str(), white, body_font);
       y += 28;
@@ -1462,7 +1849,7 @@ class App {
       }
       y += 27;
     } else {
-      DrawLine(dc, 16, y, L"按 F9 校准 ROI，F5 学习字形，F8 输入距离。", white,
+      DrawLine(dc, 16, y, L"按 F8 自动定位并输入距离；F5 重定位，F9 才需手调。", white,
                body_font);
       y += 28;
     }
@@ -1483,12 +1870,14 @@ class App {
     perf << L"CAP median/p95 " << std::fixed << std::setprecision(0)
          << capture_perf_.first << L"/" << capture_perf_.second
          << L"us  MATCH " << ocr_perf_.first << L"/" << ocr_perf_.second
-         << L"us  learned=" << learned_templates_.size();
+         << L"us  auto=" << auto_locate_successes_ << L"/"
+         << std::setprecision(2) << auto_locate_confidence_
+         << L" learned=" << learned_templates_.size();
     DrawLine(dc, 16, y, perf.str(), muted, small_font);
     y += 20;
 
     DrawLine(dc, 16, y,
-             L"F5学习  F6零采集暂停  F7符号  F8距离  F9 ROI  F10声音  Ctrl+Shift+Q退出",
+             L"F5自动定位  Shift+F5补强  F6暂停  F7符号  F8距离  F9 ROI  F10声音",
              muted, small_font);
 
     HPEN border = ready_gate_.ready() ? ready_pen_ : armed_pen_;
@@ -1501,6 +1890,8 @@ class App {
   }
 
   HINSTANCE instance_ = nullptr;
+  bool initialized_ = false;
+  bool shutdown_ = false;
   HWND overlay_ = nullptr;
   HWND roi_window_ = nullptr;
   HFONT title_font_ = nullptr;
@@ -1513,14 +1904,17 @@ class App {
   LearnedTemplateFile learned_file_;
   Roi roi_{};
   Roi saved_roi_{};
-  int threshold_ = 205;
-  int saved_threshold_ = 205;
+  int threshold_ = arcassist::kApexHudDefaultThreshold;
+  int chroma_delta_ = arcassist::kApexHudMaxChromaDelta;
+  int saved_threshold_ = arcassist::kApexHudDefaultThreshold;
   UiMode mode_ = UiMode::kNormal;
   std::wstring text_input_;
   std::wstring status_message_ = L"IDLE：当前无屏幕采集。";
   bool armed_ = false;
   bool paused_ = false;
   bool sound_ = true;
+  bool auto_located_roi_ = false;
+  bool relocation_required_ = false;
   PitchConvention convention_ = PitchConvention::kUpIsNegative;
   double last_distance_ = 30.0;
   double distance_m_ = 0.0;
@@ -1529,6 +1923,7 @@ class App {
   std::optional<double> current_pitch_;
   std::optional<double> current_elevation_;
   arcassist::ElevationStabilizer stabilizer_;
+  arcassist::PitchSignContinuity sign_guard_;
   std::optional<double> jump_candidate_;
   double jump_candidate_ms_ = -100000.0;
   double last_valid_ms_ = -100000.0;
@@ -1537,7 +1932,11 @@ class App {
   int lost_streak_ = 0;
   UINT capture_interval_ms_ = 0;
   std::uint64_t hash_reuses_ = 0;
+  std::uint64_t auto_locate_successes_ = 0;
+  double auto_locate_confidence_ = 0.0;
+  std::string auto_locate_token_;
   CaptureSurface capture_;
+  std::vector<GlyphTemplate> apex_hud_templates_;
   std::vector<GlyphTemplate> templates_;
   std::vector<GlyphTemplate> learned_templates_;
   std::vector<BinaryGrid> pending_training_components_;
@@ -1555,9 +1954,9 @@ class App {
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
-  // The manifest requests PerMonitorV2. This call is a compatibility fallback
-  // for older systems and does not create a polling/background path.
-  SetProcessDPIAware();
+  // resources/app.manifest declares PerMonitorV2 with a legacy per-monitor
+  // fallback, so GDI coordinates remain physical pixels without overriding
+  // that process-wide DPI context at runtime.
   App app;
   if (!app.Initialize(instance)) {
     MessageBoxW(nullptr, L"Apex Arc Assist 初始化失败。", kTitle,

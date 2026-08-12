@@ -109,6 +109,66 @@ inline std::optional<double> PitchToUpwardElevation(
   return (conv == PitchConvention::kUpIsNegative) ? -pitch_deg : pitch_deg;
 }
 
+// OCR must never silently invert a pitch merely because a leading '-' glyph
+// disappeared or an interior token suffix was parsed. A nonzero direction is
+// established only by a visible leading '+'/'-' and may subsequently omit
+// that sign only while it remains on the same established side of zero. An
+// unsigned nonzero near-zero value is not a safe exception: `2.25` can be a
+// clipped `-52.25`; only exact displayed zero is directionless.
+constexpr double kPitchSignNeutralBandDeg = 3.0;
+
+class PitchSignContinuity {
+ public:
+  void Reset() { anchored_sign_ = 0; }
+
+  // Use after a trusted signed label/token. A near-zero seed intentionally
+  // leaves the direction unanchored until a later visible sign is observed.
+  void Seed(double normalized_pitch_deg) {
+    anchored_sign_ = Sign(normalized_pitch_deg);
+  }
+
+  void RequireNeutral() { anchored_sign_ = 0; }
+
+  bool Accept(double normalized_pitch_deg, bool explicit_sign) {
+    if (!std::isfinite(normalized_pitch_deg) ||
+        std::fabs(normalized_pitch_deg) > kMaxPitchDeg) {
+      return false;
+    }
+    const int sign = Sign(normalized_pitch_deg);
+    if (sign == 0) {
+      // cl_showpos has two decimals. Accept unsigned zero only; an unsigned
+      // nonzero value inside the neutral band can still be a clipped suffix
+      // of a high-angle token and must become OCR LOST.
+      if (!explicit_sign && std::fabs(normalized_pitch_deg) >= 0.005) {
+        return false;
+      }
+      anchored_sign_ = 0;
+      return true;
+    }
+    // A visible leading '+'/'-' is the only trusted way to establish or
+    // change a nonzero direction.
+    if (explicit_sign) {
+      anchored_sign_ = sign;
+      return true;
+    }
+    return anchored_sign_ != 0 && sign == anchored_sign_;
+  }
+
+  int anchored_sign() const { return anchored_sign_; }
+  bool requires_neutral() const { return anchored_sign_ == 0; }
+
+ private:
+  static int Sign(double pitch_deg) {
+    if (!std::isfinite(pitch_deg) ||
+        std::fabs(pitch_deg) <= kPitchSignNeutralBandDeg) {
+      return 0;
+    }
+    return pitch_deg < 0.0 ? -1 : 1;
+  }
+
+  int anchored_sign_ = 0;
+};
+
 // Strict numeric grammar: [+-]? dd.dd  (sign optional, >=1 digits, optional
 // '.' followed by >=1 digits, nothing else; whole trimmed string must match).
 // Rejects values outside the physical pitch range (+-90).
