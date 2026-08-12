@@ -36,3 +36,13 @@
 
 开发根目录不是 Git worktree；发布经 `build/publish-repo/` 提交推送，并附带
 `artifacts/angle-ruler/` 回滚事务。
+
+## 发布状态
+
+- 已发布 `7281ce9`（纯角度计算器）；Windows CI run `31625003274` 全部成功：
+  - `arc_core: 287 checks, 0 failures`、`BASELINE_OK 30m→75.0000°`
+  - `DOC_VERIFY_OK documents=14 core_checks=287 workflow=manual_only`
+  - `BUILT: ...dist\ApexArcAssist.exe`；`PE_IMPORT_SCAN_OK`
+  - EXE SHA-256 `f9a1c9ca…`；artifact `ApexArcAssist-windows-x64`（161386 字节）
+- 回滚事务 `artifacts/angle-ruler/`（已在独立副本实测恢复 ecfcc7e）。
+- 剩余：用户 Windows 实机验收（F8/F9 交互、半透明可读性、CPU 零占用）。
