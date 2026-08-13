@@ -4,7 +4,10 @@ use apex_angle_reader::ocr::{self, BinaryImage};
 use apex_angle_reader::templates;
 
 mod fixtures {
-    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ang_roi.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/ang_roi.rs"
+    ));
 }
 
 fn fixture_binary() -> BinaryImage {
@@ -39,7 +42,11 @@ fn recognizes_known_pitch_from_screenshot() {
         "pitch = {}",
         result.pitch
     );
-    assert!(result.confidence > 0.7, "confidence = {}", result.confidence);
+    assert!(
+        result.confidence > 0.7,
+        "confidence = {}",
+        result.confidence
+    );
 }
 
 #[test]
@@ -73,4 +80,3 @@ fn formula_matches_ocr() {
     let expected = 60.0 * (75.5f64).to_radians().sin();
     assert!((d - expected).abs() < 1e-9);
 }
-

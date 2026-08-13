@@ -95,15 +95,7 @@ extern "system" {
     fn ShowWindow(hwnd: HWND, cmd: i32) -> i32;
     fn UpdateWindow(hwnd: HWND) -> i32;
     fn InvalidateRect(hwnd: HWND, rect: *const RECT, erase: i32) -> i32;
-    fn SetWindowPos(
-        hwnd: HWND,
-        after: HWND,
-        x: i32,
-        y: i32,
-        w: i32,
-        h: i32,
-        flags: u32,
-    ) -> i32;
+    fn SetWindowPos(hwnd: HWND, after: HWND, x: i32, y: i32, w: i32, h: i32, flags: u32) -> i32;
     fn SetLayeredWindowAttributes(hwnd: HWND, color: u32, alpha: u8, flags: u32) -> i32;
     fn RegisterHotKey(hwnd: HWND, id: i32, modifiers: u32, vk: u32) -> i32;
     fn UnregisterHotKey(hwnd: HWND, id: i32) -> i32;
@@ -260,7 +252,10 @@ impl Window {
 
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED
+                WS_EX_TOPMOST
+                    | WS_EX_TOOLWINDOW
+                    | WS_EX_NOACTIVATE
+                    | WS_EX_LAYERED
                     | WS_EX_TRANSPARENT,
                 class_ptr.as_ptr(),
                 widestring("Apex Angle Reader").as_ptr(),
@@ -285,22 +280,43 @@ impl Window {
 
         let big_font = unsafe {
             CreateFontW(
-                -48, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH,
+                -48,
+                0,
+                0,
+                0,
+                FW_BOLD,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY,
+                DEFAULT_PITCH,
                 widestring("Consolas").as_ptr(),
             )
         };
         let small_font = unsafe {
             CreateFontW(
-                -15, 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH,
+                -15,
+                0,
+                0,
+                0,
+                400,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY,
+                DEFAULT_PITCH,
                 widestring("Microsoft YaHei UI").as_ptr(),
             )
         };
         let bg_brush = unsafe { CreateSolidBrush(0x1310_0A) }; // RGB(10,16,19) little-endian
         let border_pen = unsafe { CreatePen(PS_SOLID, 2, 0xAA78_5A) }; // RGB(90,120,170)
-        if big_font.is_null() || small_font.is_null() || bg_brush.is_null()
-            || border_pen.is_null()
+        if big_font.is_null() || small_font.is_null() || bg_brush.is_null() || border_pen.is_null()
         {
             return Err("GDI object creation failed".into());
         }
@@ -321,7 +337,12 @@ impl Window {
         unsafe {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut *win as *mut Window as isize);
             RegisterHotKey(hwnd, HOTKEY_TOGGLE, 0, VK_F9);
-            RegisterHotKey(hwnd, HOTKEY_QUIT, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, 0x51);
+            RegisterHotKey(
+                hwnd,
+                HOTKEY_QUIT,
+                MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT,
+                0x51,
+            );
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             UpdateWindow(hwnd);
         }
@@ -388,7 +409,11 @@ impl Window {
                 WINDOW_W,
                 WINDOW_H,
                 SWP_NOACTIVATE
-                    | if self.visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW },
+                    | if self.visible {
+                        SWP_SHOWWINDOW
+                    } else {
+                        SWP_HIDEWINDOW
+                    },
             );
         }
     }
@@ -396,7 +421,14 @@ impl Window {
     fn toggle(&mut self) {
         self.visible = !self.visible;
         unsafe {
-            ShowWindow(self.hwnd, if self.visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+            ShowWindow(
+                self.hwnd,
+                if self.visible {
+                    SW_SHOWNOACTIVATE
+                } else {
+                    SW_HIDE
+                },
+            );
         }
     }
 
@@ -413,32 +445,64 @@ impl Window {
             let gray = 0x9B91_8Cu32; // RGB(140,145,155)
             let white = 0xF8F3_F0u32;
 
-            let mut big_rect = RECT { left: 14, top: 6, right: rect.right - 10, bottom: 62 };
+            let mut big_rect = RECT {
+                left: 14,
+                top: 6,
+                right: rect.right - 10,
+                bottom: 62,
+            };
             if let (Some(d), Some(_p)) = (self.state.distance, self.state.pitch) {
                 let mut text = format!("{:.1} m", d);
                 let buf = text.encode_utf16().collect::<Vec<u16>>();
                 SetTextColor(dc, green);
                 SelectObject(dc, self.big_font as HGDIOBJ);
-                DrawTextW(dc, buf.as_ptr(), buf.len() as i32, &mut big_rect,
-                          DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOCLIP);
+                DrawTextW(
+                    dc,
+                    buf.as_ptr(),
+                    buf.len() as i32,
+                    &mut big_rect,
+                    DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOCLIP,
+                );
             } else {
                 let buf: Vec<u16> = "-- m".encode_utf16().collect();
                 SetTextColor(dc, gray);
                 SelectObject(dc, self.big_font as HGDIOBJ);
-                DrawTextW(dc, buf.as_ptr(), buf.len() as i32, &mut big_rect,
-                          DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOCLIP);
+                DrawTextW(
+                    dc,
+                    buf.as_ptr(),
+                    buf.len() as i32,
+                    &mut big_rect,
+                    DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOCLIP,
+                );
             }
 
-            let mut small_rect = RECT { left: 14, top: 64, right: rect.right - 10, bottom: 92 };
+            let mut small_rect = RECT {
+                left: 14,
+                top: 64,
+                right: rect.right - 10,
+                bottom: 92,
+            };
             let small: String = match self.state.pitch {
                 Some(p) => format!("pitch {:.1}°  置信 {:.2}", p, self.state.confidence),
                 None => "未检测到 pitch（--）".to_string(),
             };
             let buf: Vec<u16> = small.encode_utf16().collect();
-            SetTextColor(dc, if self.state.pitch.is_some() { white } else { gray });
+            SetTextColor(
+                dc,
+                if self.state.pitch.is_some() {
+                    white
+                } else {
+                    gray
+                },
+            );
             SelectObject(dc, self.small_font as HGDIOBJ);
-            DrawTextW(dc, buf.as_ptr(), buf.len() as i32, &mut small_rect,
-                      DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOCLIP);
+            DrawTextW(
+                dc,
+                buf.as_ptr(),
+                buf.len() as i32,
+                &mut small_rect,
+                DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOCLIP,
+            );
 
             let old_pen = SelectObject(dc, self.border_pen as HGDIOBJ);
             let old_brush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
@@ -460,12 +524,7 @@ fn widestring(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-unsafe extern "system" fn window_proc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: usize,
-    lparam: isize,
-) -> isize {
+unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
     let win_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     if win_ptr == 0 {
         return DefWindowProcW(hwnd, msg, wparam, lparam);

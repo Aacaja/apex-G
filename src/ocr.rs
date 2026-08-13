@@ -33,12 +33,15 @@ pub fn binarize(gray: &[u8], rgb: &[u8], width: usize, height: usize) -> BinaryI
             let b = rgb[j + 2] as i32;
             let hi = r.max(g).max(b);
             let lo = r.min(g).min(b);
-            let foreground =
-                hi >= 150 && ((hi - lo) <= 64 || (hi >= 248 && lo >= 190));
+            let foreground = hi >= 150 && ((hi - lo) <= 64 || (hi >= 248 && lo >= 190));
             pixels[i] = if foreground { 1 } else { 0 };
         }
     }
-    BinaryImage { width, height, pixels }
+    BinaryImage {
+        width,
+        height,
+        pixels,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -101,7 +104,13 @@ pub fn segment(bin: &BinaryImage) -> Vec<Glyph> {
             for (cx, cy) in cells {
                 gp[(cy - min_y) as usize * gw + (cx - min_x) as usize] = 1;
             }
-            out.push(Glyph { x: min_x, y: min_y, w: gw, h: gh, pixels: gp });
+            out.push(Glyph {
+                x: min_x,
+                y: min_y,
+                w: gw,
+                h: gh,
+                pixels: gp,
+            });
         }
     }
     out.sort_by_key(|g| (g.y, g.x));
@@ -148,16 +157,16 @@ fn score(a: &[u8; TEMPLATE_W * TEMPLATE_H], b: &[u8; TEMPLATE_W * TEMPLATE_H]) -
             same += 1;
         }
     }
-    let overlap = if ca.max(cb) == 0 { 0.0 } else { inter as f64 / ca.max(cb) as f64 };
+    let overlap = if ca.max(cb) == 0 {
+        0.0
+    } else {
+        inter as f64 / ca.max(cb) as f64
+    };
     let equal = same as f64 / (TEMPLATE_W * TEMPLATE_H) as f64;
     0.76 * overlap + 0.24 * equal
 }
 
-pub fn classify(
-    g: &Glyph,
-    templates: &[NormalizedTemplate],
-    allowed: &str,
-) -> Option<(char, f64)> {
+pub fn classify(g: &Glyph, templates: &[NormalizedTemplate], allowed: &str) -> Option<(char, f64)> {
     let mut norm = [0u8; TEMPLATE_W * TEMPLATE_H];
     normalize_glyph(g, &mut norm);
     let mut best: Option<(char, f64)> = None;
@@ -185,11 +194,8 @@ fn cluster_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
         let mut placed = false;
         for line in lines.iter_mut() {
             let ref_h = line.iter().map(|x| x.h).max().unwrap_or(1) as i32;
-            let line_cy = line
-                .iter()
-                .map(|x| 2 * x.y + x.h as i32)
-                .sum::<i32>()
-                / line.len() as i32;
+            let line_cy =
+                line.iter().map(|x| 2 * x.y + x.h as i32).sum::<i32>() / line.len() as i32;
             if (cy - line_cy).abs() <= ref_h.max(4) {
                 line.push(g);
                 placed = true;

@@ -27,7 +27,9 @@ use anyhow::{bail, Result};
 
 #[cfg(not(windows))]
 fn main() {
-    eprintln!("apex-angle-reader: this binary only runs on Windows; use the GitHub Actions artifact.");
+    eprintln!(
+        "apex-angle-reader: this binary only runs on Windows; use the GitHub Actions artifact."
+    );
 }
 
 #[cfg(windows)]
@@ -45,9 +47,10 @@ fn parse_args() -> Result<(capture::CaptureConfig, usize, usize)> {
                     .ok_or_else(|| anyhow::anyhow!("--monitor needs an index"))?;
             }
             "--roi" => {
-                let v = args.next().ok_or_else(|| anyhow::anyhow!("--roi needs x,y,w,h"))?;
-                let parts: Vec<usize> =
-                    v.split(',').filter_map(|p| p.parse().ok()).collect();
+                let v = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--roi needs x,y,w,h"))?;
+                let parts: Vec<usize> = v.split(',').filter_map(|p| p.parse().ok()).collect();
                 if parts.len() != 4 {
                     bail!("--roi must be x,y,w,h");
                 }
@@ -153,7 +156,11 @@ fn main() -> Result<()> {
             }
         }
         if total_frames % (hz as u64 * 5) == 0 {
-            let ratio = if total_frames > 0 { ok_frames as f64 / total_frames as f64 } else { 0.0 };
+            let ratio = if total_frames > 0 {
+                ok_frames as f64 / total_frames as f64
+            } else {
+                0.0
+            };
             println!("frame={total_frames} ok={ok_frames} ratio={ratio:.2} last_ms={frame_ms:.1}");
         }
         win.set_state(state);

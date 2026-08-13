@@ -15,7 +15,13 @@ impl Default for CaptureConfig {
         // Defaults measured for the user's setup (2560x1440 display, HUD block
         // at y 36..76, x 0..~240): a 320x120 ROI covers the whole cl_showpos
         // block with margin.
-        Self { monitor: 0, roi_x: 0, roi_y: 0, roi_w: 320, roi_h: 120 }
+        Self {
+            monitor: 0,
+            roi_x: 0,
+            roi_y: 0,
+            roi_w: 320,
+            roi_h: 120,
+        }
     }
 }
 
