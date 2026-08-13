@@ -705,7 +705,7 @@ impl Window {
             DrawTextW(
                 self.mem_dc,
                 text.as_ptr(),
-                text.len() as i32,
+                text.len() as i32 - 1,
                 &mut big_rect,
                 DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOCLIP,
             );
@@ -737,7 +737,7 @@ impl Window {
             DrawTextW(
                 self.mem_dc,
                 small.as_ptr(),
-                small.len() as i32,
+                small.len() as i32 - 1,
                 &mut small_rect,
                 DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOCLIP,
             );
