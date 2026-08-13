@@ -35,6 +35,11 @@ fn main() {
 }
 
 #[cfg(windows)]
+/// Only pitch values steeper than this trigger an update; flatter angles map
+/// to near-60m distances where the display is meaningless.
+const TRIGGER_MIN_ABS_PITCH: f64 = 40.0;
+
+#[cfg(windows)]
 fn parse_args() -> Result<(capture::CaptureConfig, usize, usize)> {
     let mut cfg = capture::CaptureConfig::default();
     let mut hz = 60usize;
@@ -138,40 +143,52 @@ fn main() -> Result<()> {
         last = now;
         total_frames += 1;
 
-        // Capture + OCR + formula.
-        let mut state = ui::PanelState::default();
-        match capture::grab_roi_gray(&cfg) {
-            Ok((gray, rgb, w, h)) => {
-                let bin = ocr::binarize(&gray, &rgb, w as usize, h as usize);
-                if let Some(result) = ocr::recognize_pitch(&bin, &templates) {
-                    if let Some(distance) = formula::distance_for_pitch(result.pitch) {
-                        state.pitch = Some(result.pitch);
-                        state.distance = Some(distance);
-                        state.confidence = result.confidence;
-                        state.capture_ok = true;
-                        ok_frames += 1;
+        if win.visible() {
+            // Capture + OCR + formula. Below |pitch| <= 40 deg the distance is
+            // always near 60m (no usable resolution), so keep the overlay on
+            // its previous value / "--" instead of wasting an update.
+            let mut state = ui::PanelState::default();
+            match capture::grab_roi_gray(&cfg) {
+                Ok((gray, rgb, w, h)) => {
+                    let bin = ocr::binarize(&gray, &rgb, w as usize, h as usize);
+                    if let Some(result) = ocr::recognize_pitch(&bin, &templates) {
+                        if result.pitch.abs() > TRIGGER_MIN_ABS_PITCH {
+                            if let Some(distance) = formula::distance_for_pitch(result.pitch) {
+                                state.pitch = Some(result.pitch);
+                                state.distance = Some(distance);
+                                state.confidence = result.confidence;
+                                state.capture_ok = true;
+                                ok_frames += 1;
+                            }
+                        }
                     }
                 }
+                Err(e) => {
+                    eprintln!("capture error: {e:#}");
+                }
             }
-            Err(e) => {
-                eprintln!("capture error: {e:#}");
+            if total_frames % (hz as u64 * 5) == 0 {
+                let ratio = if total_frames > 0 {
+                    ok_frames as f64 / total_frames as f64
+                } else {
+                    0.0
+                };
+                println!(
+                    "frame={total_frames} ok={ok_frames} ratio={ratio:.2} last_ms={frame_ms:.1}"
+                );
             }
-        }
-        if total_frames % (hz as u64 * 5) == 0 {
-            let ratio = if total_frames > 0 {
-                ok_frames as f64 / total_frames as f64
-            } else {
-                0.0
-            };
-            println!("frame={total_frames} ok={ok_frames} ratio={ratio:.2} last_ms={frame_ms:.1}");
-        }
-        win.set_state(state);
-        win.present();
+            win.set_state(state);
+            win.present();
 
-        // Pace to the requested rate.
-        let work = now.elapsed();
-        if work < interval {
-            std::thread::sleep(interval - work);
+            // Pace to the requested rate.
+            let work = now.elapsed();
+            if work < interval {
+                std::thread::sleep(interval - work);
+            }
+        } else {
+            // Panel hidden (F9): zero capture, zero OCR, zero CPU. The message
+            // pump above still answers F9/Ctrl+Shift+Q immediately.
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 

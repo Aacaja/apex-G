@@ -19,9 +19,11 @@ pub struct BinaryImage {
     pub pixels: Vec<u8>, // 0 or 1
 }
 
-/// Binarize grayscale+RGB using the same rule the offline template
-/// extraction used: bright AND near-neutral (white HUD text with dark
-/// shadow), with a saturated-white fallback.
+/// Binarize grayscale+RGB: bright AND near-neutral (white HUD text), with a
+/// saturated-white fallback. A drop-shadow test was tried but it eroded the
+/// interior strokes of small glyphs (e.g. the bar of '4'), so the binarizer
+/// stays a plain threshold; background noise is rejected later by the ANG
+/// anchor + per-glyph score thresholds.
 pub fn binarize(gray: &[u8], rgb: &[u8], width: usize, height: usize) -> BinaryImage {
     let mut pixels = vec![0u8; width * height];
     for y in 0..height {
@@ -33,10 +35,15 @@ pub fn binarize(gray: &[u8], rgb: &[u8], width: usize, height: usize) -> BinaryI
             let b = rgb[j + 2] as i32;
             let hi = r.max(g).max(b);
             let lo = r.min(g).min(b);
-            let foreground = hi >= 150 && ((hi - lo) <= 64 || (hi >= 248 && lo >= 190));
+            // Saturated-white fallback plus a tinted-bright rule so strokes
+            // blended onto colored scenery (e.g. a red wall dimming the
+            // white glyphs) are not dropped: hi>=155 with chroma<=100.
+            let foreground = hi >= 150
+                && ((hi - lo) <= 64 || (hi >= 248 && lo >= 190) || (hi >= 155 && (hi - lo) <= 100));
             pixels[i] = if foreground { 1 } else { 0 };
         }
     }
+    let _ = gray;
     BinaryImage {
         width,
         height,
@@ -182,91 +189,105 @@ pub fn classify(g: &Glyph, templates: &[NormalizedTemplate], allowed: &str) -> O
     best
 }
 
-/// Cluster glyphs into text lines by vertical center. The tolerance must be
-/// generous enough to keep a decimal point (which sits below its digits)
-/// together with its token while still separating HUD rows (~20px apart).
-fn cluster_lines(glyphs: &[Glyph]) -> Vec<Vec<&Glyph>> {
-    let mut sorted: Vec<&Glyph> = glyphs.iter().collect();
-    sorted.sort_by_key(|g| 2 * g.y + g.h as i32);
-    let mut lines: Vec<Vec<&Glyph>> = Vec::new();
-    for g in sorted {
-        let cy = 2 * g.y + g.h as i32;
-        let mut placed = false;
-        for line in lines.iter_mut() {
-            let ref_h = line.iter().map(|x| x.h).max().unwrap_or(1) as i32;
-            let line_cy =
-                line.iter().map(|x| 2 * x.y + x.h as i32).sum::<i32>() / line.len() as i32;
-            if (cy - line_cy).abs() <= ref_h.max(4) {
-                line.push(g);
-                placed = true;
-                break;
-            }
-        }
-        if !placed {
-            lines.push(vec![g]);
-        }
-    }
-    lines
-}
-
 /// Find the `ANG:` label row and return its trailing digit region, or None
-/// when no trustworthy ANG row exists. The colon in this HUD font can be two
-/// separate small components (one 2x1 bar that looks like a '-' and one 2x2
-/// dot), so the check uses a punctuation window right after the G instead of
-/// requiring a single '.' component.
+/// when no trustworthy ANG row exists.
+///
+/// Strategy: scan ALL components (sorted by x) for the A-N-G label sequence
+/// (vertical centers within one glyph height, gaps within bounds), then
+/// collect every component whose center lies on the same line as the label.
+/// This is far more robust than clustering the whole frame into lines, which
+/// merges HUD rows when background noise is present. The colon may be two
+/// separate small components (a 2x1 bar and a 2x2 dot); the pitch minus sits
+/// well beyond the colon window and is kept.
 fn find_ang_line(
     glyphs: &[Glyph],
     templates: &[NormalizedTemplate],
-) -> Option<Vec<(i32, usize, char, f64)>> {
-    let lines = cluster_lines(glyphs);
-    for line in lines {
-        if line.len() < 5 {
+) -> Option<(Vec<(i32, usize, char, f64)>, f64)> {
+    // Label candidates sorted by x.
+    let mut labels: Vec<(&Glyph, char, f64)> = glyphs
+        .iter()
+        .filter(|g| g.w >= 3 && g.h >= 3 && g.w <= 32 && g.h <= 32)
+        .filter_map(|g| classify(g, templates, "ANG").map(|(c, s)| (g, c, s)))
+        .collect();
+    labels.sort_by_key(|(g, _, _)| g.x);
+
+    for i in 0..labels.len().saturating_sub(2) {
+        let (a, ca, sa) = labels[i];
+        if ca != 'A' {
             continue;
         }
-        let mut chars: Vec<(i32, usize, char, f64)> = line
-            .iter()
-            .filter_map(|g| {
-                classify(g, templates, "ANG-+.0123456789").map(|(c, s)| (g.x, g.w, c, s))
-            })
-            .collect();
-        chars.sort_by_key(|c| c.0);
-        if chars.len() < 5 {
-            continue;
+        for j in (i + 1)..labels.len().saturating_sub(1) {
+            let (n, cn, sn) = labels[j];
+            if cn != 'N' {
+                continue;
+            }
+            let h_ref = a.h.max(n.h) as i32;
+            if (2 * n.y + n.h as i32 - (2 * a.y + a.h as i32)).abs() > h_ref {
+                continue; // same x may hold glyphs from other HUD rows
+            }
+            let gap_n = n.x - (a.x + a.w as i32);
+            if gap_n < 0 || gap_n > (h_ref * 2).max(6) {
+                continue;
+            }
+            for k in (j + 1)..labels.len() {
+                let (g, cg, sg) = labels[k];
+                if cg != 'G' {
+                    continue;
+                }
+                let h_max = h_ref.max(g.h as i32);
+                if (2 * g.y + g.h as i32 - (2 * a.y + a.h as i32)).abs() > h_max {
+                    continue;
+                }
+                let gap_g = g.x - (n.x + n.w as i32);
+                if gap_g < 0 || gap_g > (h_max * 2).max(6) {
+                    continue;
+                }
+                // Colon: '.' or bar-like '-' component within the window
+                // right after G. The pitch minus sits far beyond it.
+                let g_right = g.x + g.w as i32;
+                let window = (h_max * 2).max(8);
+                let anchor_cy = 2 * a.y + a.h as i32;
+                let colon_ok = glyphs.iter().any(|c| {
+                    let d = c.x - g_right;
+                    d >= 0
+                        && d <= window
+                        && (2 * c.y + c.h as i32 - anchor_cy).abs() <= h_max
+                        && classify(c, templates, "-.")
+                            .map_or(false, |(ch, sc)| (ch == '.' || ch == '-') && sc >= 0.4)
+                });
+                if !colon_ok {
+                    continue;
+                }
+
+                // Collect every component on the ANG baseline, then return
+                // the digit region after the colon window. The pitch minus is
+                // far enough to survive.
+                let tol = h_max.max(6);
+                let mut chars: Vec<(i32, usize, char, f64)> = glyphs
+                    .iter()
+                    .filter(|c| {
+                        (2 * c.y + c.h as i32 - anchor_cy).abs() <= tol
+                            && c.w >= 1
+                            && c.h >= 1
+                            && c.w <= 48
+                            && c.h <= 48
+                    })
+                    .filter_map(|c| {
+                        classify(c, templates, "-+.0123456789").map(|(ch, s)| (c.x, c.w, ch, s))
+                    })
+                    .filter(|(_, _, _, s)| *s >= 0.55)
+                    .collect();
+                chars.sort_by_key(|c| c.0);
+                let digits: Vec<(i32, usize, char, f64)> = chars
+                    .into_iter()
+                    .filter(|c| c.0 - g_right > window)
+                    .collect();
+                if digits.len() < 3 {
+                    continue;
+                }
+                return Some((digits, (sa + sn + sg) / 3.0));
+            }
         }
-        // Require A N G in order and closely spaced.
-        if chars[0].2 != 'A' || chars[1].2 != 'N' || chars[2].2 != 'G' {
-            continue;
-        }
-        if chars[0].1 < 3 || chars[1].1 < 3 || chars[2].1 < 3 {
-            continue;
-        }
-        let gap1 = chars[1].0 - (chars[0].0 + chars[0].1 as i32);
-        let gap2 = chars[2].0 - (chars[1].0 + chars[1].1 as i32);
-        if gap1 < 0 || gap1 > 8 || gap2 < 0 || gap2 > 8 {
-            continue;
-        }
-        // Colon: a '.' or bar-like '-' component within the window right
-        // after G. The leading minus of the pitch sits much further away.
-        let g_right = chars[2].0 + chars[2].1 as i32;
-        let window = (chars[2].1 as i32 * 2).max(8);
-        let colon_ok = chars.iter().skip(3).any(|c| {
-            let d = c.0 - g_right;
-            d >= 0 && d <= window && (c.2 == '.' || c.2 == '-')
-        });
-        if !colon_ok {
-            continue;
-        }
-        // Return only the digit region: everything after the punctuation
-        // window. The pitch minus stays included (it is far from G).
-        let digits: Vec<(i32, usize, char, f64)> = chars
-            .into_iter()
-            .skip(3)
-            .filter(|c| c.0 - g_right > window || (c.2 != '.' && c.2 != '-'))
-            .collect();
-        if digits.len() < 3 {
-            continue;
-        }
-        return Some(digits);
     }
     None
 }
@@ -282,14 +303,16 @@ pub fn recognize_pitch(bin: &BinaryImage, templates: &[NormalizedTemplate]) -> O
     let glyphs = segment(bin);
     // Keep punctuation too: the minus is 4x1 and the colon 2x2 in this HUD
     // font. 1x1 noise is dropped; classify() gates the rest.
+    // Keep 1x1 components: the stretched HUD font renders '.' as a single
+    // pixel. classify() gates noise with a score threshold later.
     let filtered: Vec<Glyph> = glyphs
         .into_iter()
-        .filter(|g| g.w >= 2 && g.h >= 1 && g.w <= 96 && g.h <= 96)
+        .filter(|g| g.w >= 1 && g.h >= 1 && g.w <= 96 && g.h <= 96)
         .collect();
     if filtered.len() < 5 {
         return None;
     }
-    let mut numeric = find_ang_line(&filtered, templates)?;
+    let (mut numeric, label_confidence) = find_ang_line(&filtered, templates)?;
     // Keep only numeric glyphs; a stray 'A'-looking component is ignored.
     numeric.retain(|c| "-+.0123456789".contains(c.2));
 
@@ -345,6 +368,6 @@ pub fn recognize_pitch(bin: &BinaryImage, templates: &[NormalizedTemplate]) -> O
     if !(-90.0..0.0).contains(&pitch) {
         return None;
     }
-    let confidence = score_sum / first.len() as f64;
+    let confidence = 0.5 * label_confidence + 0.5 * score_sum / first.len() as f64;
     Some(PitchResult { pitch, confidence })
 }
