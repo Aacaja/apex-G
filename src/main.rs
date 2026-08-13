@@ -20,6 +20,8 @@ use apex_angle_reader::{formula, ocr, templates};
 #[cfg(windows)]
 use std::env;
 #[cfg(windows)]
+use std::ptr;
+#[cfg(windows)]
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
@@ -140,7 +142,7 @@ fn main() -> Result<()> {
         let mut state = ui::PanelState::default();
         match capture::grab_roi_gray(&cfg) {
             Ok((gray, rgb, w, h)) => {
-                let bin = ocr::binarize(&gray, w as usize, h as usize, Some(&rgb));
+                let bin = ocr::binarize(&gray, &rgb, w as usize, h as usize);
                 if let Some(result) = ocr::recognize_pitch(&bin, &templates) {
                     if let Some(distance) = formula::distance_for_pitch(result.pitch) {
                         state.pitch = Some(result.pitch);
