@@ -192,7 +192,7 @@ const WM_DESTROY: u32 = 0x0002;
 const WM_HOTKEY: u32 = 0x0312;
 const WM_DISPLAYCHANGE: u32 = 0x007E;
 const WM_ERASEBKGND: u32 = 0x0014;
-const WM_QUIT: u32 = 0x0012;
+pub const WM_QUIT: u32 = 0x0012;
 const WM_EXITSIZEMOVE: u32 = 0x0232;
 const HTTRANSPARENT: isize = -1;
 const HTCAPTION: isize = 2;
@@ -204,7 +204,7 @@ const MOD_NOREPEAT: u32 = 0x4000;
 const CS_HREDRAW: u32 = 0x0002;
 const CS_VREDRAW: u32 = 0x0001;
 const SPI_GETWORKAREA: u32 = 0x0030;
-const PM_REMOVE: u32 = 0x0001;
+pub const PM_REMOVE: u32 = 0x0001;
 const FW_BOLD: i32 = 700;
 const DEFAULT_CHARSET: u32 = 1;
 const OUT_DEFAULT_PRECIS: u32 = 0;
@@ -261,7 +261,10 @@ fn module_sibling_ini() -> Vec<u16> {
         let mut buf = [0u16; 1024];
         let n = GetModuleFileNameW(ptr::null_mut(), buf.as_mut_ptr(), buf.len() as u32);
         let mut path = buf[..n as usize].to_vec();
-        if let Some(pos) = path.iter().rposition(|c| *c == '\\' || *c == '/') {
+        if let Some(pos) = path
+            .iter()
+            .rposition(|c| *c == u16::from(b'\\') || *c == u16::from(b'/'))
+        {
             path.truncate(pos + 1);
         } else {
             path.clear();
