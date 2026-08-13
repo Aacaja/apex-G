@@ -712,17 +712,17 @@ impl Window {
 
             // Pitch line (or move-mode hint).
             let move_hint: String = if self.move_key == VK_F10 {
-                "拖动到目标位置 · 按 F10 锁定".to_string()
+                "DRAG MODE - F10 to lock".to_string()
             } else if self.move_key == VK_F11 {
-                "拖动到目标位置 · 按 F11 锁定".to_string()
+                "DRAG MODE - F11 to lock".to_string()
             } else {
-                "拖动到目标位置 · 按 Ctrl+Shift+M 锁定".to_string()
+                "DRAG MODE - Ctrl+Shift+M to lock".to_string()
             };
             let small: Vec<u16> = if self.move_mode {
                 widestring(&move_hint)
             } else {
                 match self.state.pitch {
-                    Some(p) => widestring(&format!("pitch {p:.1}°")),
+                    Some(p) => widestring(&format!("pitch {p:.1}")),
                     None => widestring("--"),
                 }
             };
