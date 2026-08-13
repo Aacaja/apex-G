@@ -1,14 +1,19 @@
+# Rust
+/target/
+Cargo.lock.orig
+
+# Legacy C++ build output
 build/
 dist/
-.DS_Store
-ApexArcAssist.ini
-ApexArcAssist.templates
-# User-supplied inspection screenshots stay local; tests use compact binary
-# masks derived from approved fixtures instead of committing raw game imagery.
-pic.png
-*.screenshot.png
 *.obj
 *.res
 *.pdb
 *.ilk
 *.exe
+
+# Local state
+.DS_Store
+ApexArcAssist.ini
+ApexArcAssist.templates
+pic.png
+*.screenshot.png

@@ -1,18 +1,19 @@
 # 开发与发布工作流
 
 1. 修改前阅读 `AGENTS.md`、`TASK_SPEC.md`、`docs/PROGRESS.md`。
-2. 本地验证：
+2. 本地验证（macOS）：
 
    ```bash
-   ./test.sh
-   python3 scripts/verify_docs.py
-   ruby -e 'require "yaml"; YAML.load_file(ARGV[0]); puts "WORKFLOW_YAML_PARSE_OK"' .github/workflows/windows-build.yml
+   cargo fmt --check
+   cargo test --lib
+   cargo test --test ocr_test
    ```
 
-   macOS 不能构建 Windows GUI；不要把核心编译结果描述为 MSVC 成功。
-3. 发布事务：在 `artifacts/<transaction>/` 创建快照、diff、SHA 清单、MANIFEST
-   和 `ROLLBACK.sh`（要求显式目标副本并在独立副本实测）。
-4. 同步 `build/publish-repo/`：只复制清单内文件，删除本事务废弃文件，
-   在发布树重跑测试后提交并 push。
-5. 手动触发 `workflow_dispatch` Windows CI；未拿到 run 日志前不声明 MSVC/PE 成功。
-6. 用户按 `PERFORMANCE_TEST.md` 实机验收。
+3. Windows 构建/使用一律交给 GitHub Actions（push main 自动触发
+   `.github/workflows/build.yml`），不要在 macOS 上尝试 build Windows。
+4. 发布事务：在 `artifacts/<transaction>/` 创建快照、diff、SHA 清单、MANIFEST
+   与 `ROLLBACK.sh`（要求显式目标副本并在独立副本实测）。
+5. 同步 `build/publish-repo/`（唯一可提交 Git 工作树）：复制清单文件、删除本
+   事务废弃文件，在发布树重跑测试后提交并 push。
+6. push 后查看 Actions run；未拿到日志前不声明 Windows 构建成功。
+7. 用户按 `PERFORMANCE_TEST.md` 实机验收。

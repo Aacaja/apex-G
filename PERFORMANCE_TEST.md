@@ -1,37 +1,34 @@
-# PERFORMANCE_TEST — 性能验收（角度标尺版）
+# PERFORMANCE_TEST — 实机验收协议（Rust 版）
 
-本版本**没有任何屏幕采集**：进程在 IDLE 时阻塞于 `GetMessageW`，无定时器、
-无轮询、无 BitBlt。性能验收因此非常简单。
+工具：GitHub Actions 产出的 `apex-angle-reader.exe`。
 
-## 1. 预算（验收标准）
+## 1. 验收项
 
-| 项目 | 预算 | 对应实现 |
-|---|---|---|
-| IDLE（未按任何键） | CPU 0.0%、GPU 0% | 无定时器；阻塞式 `GetMessageW` |
-| 标尺显示（F9 打开） | 打开瞬间一次重绘，之后零开销 | `WM_PAINT` 只画一次；无动画/无定时刷新 |
-| 输入距离（F8） | 仅热键处理 + 一次重绘 | 无采集 |
-| 内存 | 工作集 < 5MB | 无 DIB/位图缓存；/MT 静态 CRT |
-| 帧时间影响 | 不参与游戏帧循环；无任何后台线程/捕获 | — |
+| 项 | 标准 |
+|---|---|
+| 全屏捕获 | 游戏中持续有数字更新；若 30 秒一直 `--`，记录游戏显示模式（独占全屏/无边框） |
+| 锚点核对 | 抬头对准 −75°（游戏内 pitch 显示）→ 悬浮窗稳定 30.0 m；−45° → 60.0 m |
+| 灵敏度 | 快速转动视角，数字逐帧平滑跟随，无跳变/回退；240fps 慢录帧差 ≤4 帧 |
+| 丢帧率 | 60 秒内有效帧/总帧 ≥95%（其余为看地面/菜单等无 pitch 帧） |
+| CPU | 任务管理器 60Hz 下 <2% |
+| UI | 半透明可读、不挡 HUD、点击穿透（游戏内点击不受影响） |
 
-## 2. 测量方法（Windows）
+## 2. 测量命令
 
 ```powershell
-Get-Counter '\Process(ApexArcAssist*)\% Processor Time' -SampleInterval 1 -MaxSamples 60
-Get-Process ApexArcAssist | Select-Object WorkingSet64, PrivateMemorySize64
+Get-Counter '\Process(apex-angle-reader*)\% Processor Time' -SampleInterval 1 -MaxSamples 60
+Get-Process apex-angle-reader | Select-Object WorkingSet64
 ```
-
-状态：IDLE 60s → 按 F9 显示 60s → 按 F8 输入一次 → 60s。任务管理器核对
-IDLE 下 CPU 稳定为 0.0%，GPU 引擎列 0%。
 
 ## 3. 结果记录模板
 
-机器：____  分辨率/刷新率：____  状态：____
+机器/分辨率/游戏显示模式/缩放设置：____
 
-| 指标 | 预算 | 实测 | 通过? |
-|---|---|---|---|
-| IDLE CPU 60s 均值 | ≈0.0% | | |
-| 标尺显示 CPU 60s 均值 | ≈0.0% | | |
-| GPU 引擎占用 | 0% | | |
-| 工作集 | <5MB | | |
-| F9 显示/隐藏延迟 | <10ms（肉眼即时） | | |
-| 游戏帧时间影响 | 无（无采集/无钩子） | | |
+| 项 | 结果 |
+|---|---|
+| 全屏捕获可见 | 是/否（模式） |
+| −75° 锚点 | ____ m |
+| −45° 锚点 | ____ m |
+| 慢录帧差 | ____ 帧 |
+| 60s 有效帧率 | ____% |
+| CPU 均值 | ____% |

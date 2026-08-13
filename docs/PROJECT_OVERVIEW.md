@@ -1,29 +1,13 @@
 # 项目概览
 
-Apex Arc Assist 是 Windows 原生、**零屏幕采集**的高抛角度计算器。用户手动瞄准
-投掷；程序只计算并显示角度参照。
+Apex Angle Reader 是 Windows 原生 Rust 工具：实时读取 Apex `cl_showpos` 左上角
+HUD 的 `ang:` 行（纯像素模板匹配），反解高抛公式后，在半透明悬浮窗直接显示
+"当前角度可抛出的距离"。用户自己核对距离、自己决定投掷。
 
-公式（固定契约，不可替换为低抛分支）：
+公式：`x = 90 - degrees(asin(y/60)) / 2`；反解 `y = 60 * sin(radians((90 + pitch) * 2))`。
+锚点：−75°→30m、−45°→60m。
 
-```text
-x = 90 - degrees(asin(y / 60)) / 2
-```
+边界：只读屏幕像素（WGC）+ 本地计算 + 自己的悬浮窗；无网络、无进程访问、
+无注入、无合成输入。详见 `SECURITY_BOUNDARY.md`。
 
-锚点：30m → 75°、60m → 45°。
-
-## 用户流程
-
-1. 按 F9 显示半透明标尺（默认隐藏）：10–60m 每 10m 一档的角度表。
-2. 按 F8 输入当前距离（1–60m），对应行高亮并显示当前目标角度。
-3. 自己目视角度，判断是否投掷。
-
-## 运行时边界
-
-允许：热键、本地计算、自己的半透明置顶悬浮窗、exe 同目录 INI。
-禁止：一切屏幕捕获、系统 OCR、GPU/视频管线、进程/内存访问、注入、Hook、驱动、
-网络、合成输入、游戏窗口消息。完整清单见 [`../SECURITY_BOUNDARY.md`](../SECURITY_BOUNDARY.md)。
-
-## 验证状态
-
-可移植核心测试、静态边界、文档检查已本地通过；Windows MSVC 构建与 PE 导入审计
-经手动 CI 验证；实机交互按 [`PERFORMANCE_TEST.md`](../PERFORMANCE_TEST.md) 验收。
+开发在 macOS（只跑跨平台测试），Windows 编译/使用全部交给 GitHub Actions。

@@ -1,28 +1,23 @@
-# 架构与数据流
+# 架构
 
-## 组件
-
-| 组件 | 路径 | 职责 |
-|---|---|---|
-| 可移植核心 | `src/arc_core.h` | 高抛公式、容差（30m→75°、60m→45°） |
-| Win32 应用 | `src/apex_arc_assist.cpp` | 热键、INI、半透明标尺绘制 |
-| 资源 | `resources/` | `asInvoker`、PerMonitorV2 manifest |
-| 回归 | `tests/` | 公式锚点/无效/单调/容差/标尺表 + 原始公式守护 |
-
-## 数据流
-
-```text
-F8 → 数字热键输入 1–60m → 本地公式 → 高亮标尺行 + “当前目标 xxm → xx.x°”
-F9 → ShowWindow 切换半透明标尺（10m..60m 角度表）
-Ctrl+Shift+Q → 退出
+```
+┌────────────────────────────────────────────────────────┐
+│ main.rs（Windows）                                      │
+│  PeekMessage 循环（F9/Ctrl+Shift+Q）                    │
+│  └─ 每帧（默认 60Hz）：                                  │
+│     capture::grab_roi_gray()  xcap/WGC ROI 320×120      │
+│        → ocr::binarize  (阈值150 + 近中性)               │
+│        → ocr::segment   8邻域连通域                     │
+│        → ocr::cluster_lines  行聚类(ref_h.max(4))       │
+│        → templates::match  12×18 归一化 SAD/重叠         │
+│        → ocr::find_ang_line  A-N-G + 冒号窗口校验       │
+│        → ocr::recognize_pitch  负号门 → f64             │
+│        → formula::distance_for_pitch  反解              │
+│        → ui::Window::present  半透明悬浮窗               │
+└────────────────────────────────────────────────────────┘
 ```
 
-无采集、无定时器、无轮询：IDLE 时进程阻塞于 `GetMessageW`，CPU 为零。
-
-## 标尺 UI
-
-- 右上角，`WS_EX_TOPMOST|TOOLWINDOW|NOACTIVATE|LAYERED|TRANSPARENT`，
-  `WM_NCHITTEST → HTTRANSPARENT`：点击穿透、不抢焦点。
-- `LWA_ALPHA 208`：半透明，不挡游戏数据。
-- 每行：左侧距离（小字）+ 右侧角度（24px 粗体大字号）；当前距离行琥珀色高亮。
-- 默认隐藏；F9 切换；输入模式自动显示。
+- `templates.rs`：离线嵌入 7×7 精确字形 + 5×7 兜底，启动时归一化为 12×18。
+- `ui.rs`：LayeredWindow(alpha 205) + HTTRANSPARENT，左上 (12,96)，大字距离。
+- 平台：`capture.rs`/`ui.rs`/Windows `main` 均 `#[cfg(windows)]`；macOS 只编译
+  lib（formula/ocr/templates）跑测试。

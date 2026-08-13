@@ -1,0 +1,23 @@
+[package]
+name = "apex-angle-reader"
+version = "0.1.0"
+edition = "2021"
+description = "Apex Legends high-arc angle -> distance reader (pixel-only, local)"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+
+# Capture (xcap) and its image buffer are Windows-only. Keeping them behind
+# cfg(windows) lets macOS/Linux run the portable OCR/formula tests without
+# downloading the capture stack; Windows CI builds the full binary.
+[target.'cfg(windows)'.dependencies]
+xcap = "0.4"
+image = "0.25"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

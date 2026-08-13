@@ -1,61 +1,46 @@
-# Apex Arc Assist — Implementation Contract
+# Apex Angle Reader — Implementation Contract
 
 ## Goal
-Windows x64 native high-arc angle calculator with a readable, semi-transparent
-distance ruler overlay. No screen capture, no OCR, no game access.
+Windows x64 Rust binary that continuously reads the `ang:` line of the Apex
+`cl_showpos` HUD via pixel-only template matching, computes the high-arc throw
+distance from the pitch, and shows it in a semi-transparent click-through
+overlay. The user reads the distance and decides when to throw; no input from
+the user is required (no distance entry).
 
-Formula (must never be replaced by the low branch `degrees(asin(y/60))/2`):
+## Core logic
+Forward formula (fixed contract, never replaced by the low branch):
+`x = 90 - degrees(asin(y / 60)) / 2` with anchors 30m->75 deg, 60m->45 deg.
+Inverse (pitch is negative when looking up): `y = 60 * sin(radians((90 + pitch) * 2))`.
+Validation: -75 deg -> 30m, -45 deg -> 60m, -85 deg -> ~10.4m.
 
-`x = 90 - degrees(asin(y / 60)) / 2`
+## Pipeline
+1. `capture.rs`: xcap monitor capture, crop ROI (default 0,0,320x120; monitor 0).
+2. `ocr.rs`: binarize (bright + near-neutral, threshold 150 / chroma 64 with
+   saturated fallback) -> 8-connected components -> vertical line clustering ->
+   aspect-preserving normalization to 12x18 -> SAD/overlap template matching ->
+   `ANG:` label validation (A,N,G in order + colon punctuation window) ->
+   first numeric token.
+3. Fail-closed: the pitch token MUST start with a visible '-'; range
+   (-90, 0); any ambiguity yields no update (overlay shows "--").
+4. `formula.rs`: inverse formula -> distance.
+5. `ui.rs`: Win32 layered window (alpha ~205), click-through, top-left below
+   the HUD block (default top 96), large distance digits + small pitch text.
+6. `main.rs`: PeekMessage loop + paced capture (default 60 Hz, `--hz` 10..240),
+   F9 toggles visibility, Ctrl+Shift+Q quits. CLI: `--monitor N`,
+   `--roi x,y,w,h`, `--hz N`, `--top px`.
 
-- `x`: upward elevation in degrees, 45-90.
-- `y`: distance in metres, 1-60.
-- Anchors: 30m -> 75 degrees; 60m -> 45 degrees.
+## Constraints
+- Rust only; no OpenCV, no C++ bindings, no OCR SDKs.
+- Capture via Windows Graphics Capture (xcap). No network, no WebSocket, no
+  process/memory access, no injection, no hooks, no synthetic input.
+- Runtime never opens image files; templates are embedded; tests use an
+  offline binary fixture derived from the user screenshot (pic.png, not in git).
+- macOS/Linux: develop + run portable tests only. Windows build happens
+  exclusively in GitHub Actions (push to main).
+- The overlay never steals focus and never blocks clicks.
 
-## Isolation boundary
-The application may only:
-- register hotkeys (F8 distance input, F9 ruler toggle, Ctrl+Shift+Q exit),
-- calculate locally,
-- show its own topmost click-through layered overlay,
-- read/write one INI next to the exe.
-
-It must never perform screen capture of any kind, use Windows OCR, GPU/video
-pipelines (Direct3D/DXGI/WGC/Media Foundation/OBS), process/memory access,
-injection, hooks, drivers, network, synthetic input, or game-window messages.
-
-## Interaction
-- F9: toggle the ruler panel. It starts hidden and stays hidden until F9.
-- F8: enter distance. Digit/numpad/decimal/Backspace/Enter/Esc hotkeys are
-  active only while entering. Enter commits 1-60m (decimal allowed); empty
-  Enter reuses the last distance; Esc cancels.
-- Ctrl+Shift+Q: exit.
-- The user reads the panel and aims/throws manually.
-
-## Ruler panel
-- Top-right of the work area, always-on-top, `WS_EX_NOACTIVATE` +
-  `WS_EX_TRANSPARENT` + `WM_NCHITTEST -> HTTRANSPARENT` (click-through).
-- Semi-transparent: layered window alpha so game data behind remains readable.
-- Shows 10/20/30/40/50/60m -> 85.2/80.3/75.0/69.1/61.8/45.0 degrees with large
-  angle glyphs.
-- When a distance was entered, that row is highlighted and the panel header
-  shows "current target" distance -> angle.
-- No timers, no capture, no polling: the process is idle until a hotkey.
-
-## Structure
-- `src/arc_core.h`: portable high-arc formula + tolerance (copy of
-  `original/arc_core.h`, extended only with shared constants).
-- `src/apex_arc_assist.cpp`: Win32 window, hotkeys, INI persistence, ruler
-  painting.
-- `resources/app.manifest`, `resources/ApexArcAssist.rc`.
-- `build-windows.cmd`: MSVC build into `dist/ApexArcAssist.exe`.
-- `.github/workflows/windows-build.yml`: manual `workflow_dispatch` MSVC build,
-  core tests, PE import audit, SHA-256, artifact upload.
-- `tests/test_arc_core.cpp`: formula anchors/invalid/tolerance/ruler-table.
-- `tests/baseline_test.cpp`: compiles `original/arc_core.h` unchanged,
-  guarding 30m -> 75.0000.
-
-## Verification
-Core tests cover 0/1/30/40/55/60m anchors, invalid inputs, anti-low-branch
-guard, monotonicity, derivative tolerance clamps, and the 10-60m ruler table.
-Static checks prove no prohibited capture/process/GPU/network API names in
-runtime source. Windows build/import audit runs only via manual CI.
+## Deliverables
+- Rust crate at repo root (Cargo.toml + src/*), tests, `tools/` extraction
+  script, `.github/workflows/build.yml`, README/AGENTS/PROGRESS docs.
+- Old C++ code archived under `legacy-cpp/`.
+- Rollback transaction under `artifacts/rust-rewrite/`.
