@@ -15,7 +15,8 @@ Windows 原生 Rust 工具：实时读取 Apex `cl_showpos` 左上角 HUD 的 `a
 - 启动 `apex-angle-reader.exe`（需要游戏开启 `+cl_showpos 1`）
 - `F9`：显示/隐藏悬浮窗
 - `F10`：**拖动模式**——按住面板拖动到任意位置，再按 F10 锁定（位置自动保存
-  到 exe 同目录 `apex-angle-reader.ini`，下次启动沿用）
+  到 exe 同目录 `apex-angle-reader.ini`，下次启动沿用）。若 F10 被占用，自动改用
+  `F11` 或 `Ctrl+Shift+M`，进入拖动模式后面板会提示实际按键）
 - `Ctrl+Shift+Q`：退出
 - 默认位置：屏幕**正中偏下**（视线焦点附近）；也可用 `--left`/`--top` 指定
 - 命令行参数：
@@ -24,8 +25,9 @@ Windows 原生 Rust 工具：实时读取 Apex `cl_showpos` 左上角 HUD 的 `a
   - `--hz 10..240`：捕获频率（默认 60）
   - `--left px` / `--top px`：面板位置（默认居中偏下）
   - `--offset 米`：距离补偿（默认 `-1.5`，正数=显示更远）
-- 面板：无边框、半透明、Apex 风格工业字体（Bahnschrift）；大字 = 当前可抛出
-  距离（米），小字 = 当前 pitch；识别失败显示 `--`
+- 面板：无边框、**背景完全透明（只有文字可见）**、Apex 风格工业字体
+  （Bahnschrift）；大字 = 当前可抛出距离（米），小字 = 当前 pitch 实时显示；
+  距离仅在 |pitch|>40° 时出现，否则大字显示 `--`
 
 ## 核心逻辑
 

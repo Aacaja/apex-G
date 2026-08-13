@@ -243,6 +243,7 @@ pub struct Window {
     bg_brush: HBRUSH,
     visible: bool,
     move_mode: bool,
+    move_key: u32,
     left: i32,
     top: i32,
     use_center_default: bool,
@@ -353,7 +354,7 @@ impl Window {
             return Err("CreateWindowExW failed".into());
         }
         unsafe {
-            SetLayeredWindowAttributes(hwnd, 0, 200, LWA_ALPHA);
+            SetLayeredWindowAttributes(hwnd, 0, 200, LWA_COLORKEY | LWA_ALPHA);
         }
 
         // Apex-style industrial font (Bahnschrift ships with Win10 1809+;
@@ -394,7 +395,7 @@ impl Window {
                 widestring("Bahnschrift").as_ptr(),
             )
         };
-        let bg_brush = unsafe { CreateSolidBrush(0x1411_0C) }; // RGB(12,17,20)
+        let bg_brush = unsafe { CreateSolidBrush(0) }; // black = color key (transparent)
         if big_font.is_null() || small_font.is_null() || bg_brush.is_null() {
             return Err("GDI object creation failed".into());
         }
@@ -407,6 +408,7 @@ impl Window {
             bg_brush,
             visible: true,
             move_mode: false,
+            move_key: VK_F10,
             left: left.max(0),
             top: top.max(0),
             use_center_default,
@@ -418,13 +420,25 @@ impl Window {
         unsafe {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut *win as *mut Window as isize);
             RegisterHotKey(hwnd, HOTKEY_TOGGLE, 0, VK_F9);
-            RegisterHotKey(hwnd, HOTKEY_MOVE, 0, VK_F10);
+            let mut move_key = VK_F10;
+            if RegisterHotKey(hwnd, HOTKEY_MOVE, 0, VK_F10) == 0 {
+                // F10 may be taken by the game/other tools; fall back to F11
+                // or Ctrl+Shift+M so dragging stays reachable.
+                if RegisterHotKey(hwnd, HOTKEY_MOVE, 0, VK_F11) == 0 {
+                    RegisterHotKey(hwnd, HOTKEY_MOVE, MOD_CONTROL | MOD_SHIFT, 0x4D);
+                    move_key = 0x4D;
+                } else {
+                    move_key = VK_F11;
+                }
+            }
+            win.move_key = move_key;
             RegisterHotKey(
                 hwnd,
                 HOTKEY_QUIT,
                 MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT,
                 0x51,
             );
+            win.position();
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             UpdateWindow(hwnd);
         }
@@ -605,8 +619,15 @@ impl Window {
                 right: rect.right - 8,
                 bottom: rect.bottom - 4,
             };
+            let move_hint: String = if self.move_key == VK_F10 {
+                "拖动到目标位置 · 按 F10 锁定".to_string()
+            } else if self.move_key == VK_F11 {
+                "拖动到目标位置 · 按 F11 锁定".to_string()
+            } else {
+                "拖动到目标位置 · 按 Ctrl+Shift+M 锁定".to_string()
+            };
             let small: Vec<u16> = if self.move_mode {
-                widestring("拖动到目标位置 · 按 F10 锁定")
+                widestring(&move_hint)
             } else {
                 match self.state.pitch {
                     Some(p) => widestring(&format!("pitch {p:.1}°")),

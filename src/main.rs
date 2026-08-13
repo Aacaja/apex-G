@@ -169,14 +169,17 @@ fn main() -> Result<()> {
                 Ok((gray, rgb, w, h)) => {
                     let bin = ocr::binarize(&gray, &rgb, w as usize, h as usize);
                     if let Some(result) = ocr::recognize_pitch(&bin, &templates) {
+                        // The pitch line always updates so the user sees the
+                        // tool is alive; the big distance only appears when
+                        // the angle is steep enough to be meaningful.
+                        state.pitch = Some(result.pitch);
+                        state.confidence = result.confidence;
+                        state.capture_ok = true;
                         if result.pitch.abs() > TRIGGER_MIN_ABS_PITCH {
                             if let Some(distance) =
                                 formula::display_distance_for_pitch(result.pitch, offset_m)
                             {
-                                state.pitch = Some(result.pitch);
                                 state.distance = Some(distance);
-                                state.confidence = result.confidence;
-                                state.capture_ok = true;
                                 ok_frames += 1;
                             }
                         }
