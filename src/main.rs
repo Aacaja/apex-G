@@ -45,6 +45,7 @@ fn parse_args() -> Result<(capture::CaptureConfig, usize, i32, i32)> {
     let mut hz = 60usize;
     let mut left = -1i32;
     let mut top = -1i32;
+    let mut offset_m = formula::DISTANCE_OFFSET_M;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -80,6 +81,12 @@ fn parse_args() -> Result<(capture::CaptureConfig, usize, i32, i32)> {
                     .and_then(|v| v.parse().ok())
                     .ok_or_else(|| anyhow::anyhow!("--top needs pixels"))?;
             }
+            "--offset" => {
+                offset_m = args
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or_else(|| anyhow::anyhow!("--offset needs metres, e.g. -1.5"))?;
+            }
             "--left" => {
                 left = args
                     .next()
@@ -91,19 +98,20 @@ fn parse_args() -> Result<(capture::CaptureConfig, usize, i32, i32)> {
                     "apex-angle-reader [--monitor N] [--roi x,y,w,h] [--hz 10..240] [--top px]\n\
                      Defaults: monitor 0, roi 0,0,320,120, hz 60.\n\
                      Panel: default center-lower; F10 drag-move (saved to ini),\n\
-                     F9 toggles, Ctrl+Shift+Q quits. --left/--top override."
+                     F9 toggles, Ctrl+Shift+Q quits. --left/--top override.\n\
+                     --offset METRES: distance compensation (default -1.5)."
                 );
                 std::process::exit(0);
             }
             other => bail!("unknown argument: {other}"),
         }
     }
-    Ok((cfg, hz, left, top))
+    Ok((cfg, hz, left, top, offset_m))
 }
 
 #[cfg(windows)]
 fn main() -> Result<()> {
-    let (cfg, hz, left, top) = parse_args()?;
+    let (cfg, hz, left, top, offset_m) = parse_args()?;
     let templates = templates::build_normalized();
     println!(
         "apex-angle-reader: monitor={} roi={},{},{}x{} hz={} top={}",
@@ -162,7 +170,9 @@ fn main() -> Result<()> {
                     let bin = ocr::binarize(&gray, &rgb, w as usize, h as usize);
                     if let Some(result) = ocr::recognize_pitch(&bin, &templates) {
                         if result.pitch.abs() > TRIGGER_MIN_ABS_PITCH {
-                            if let Some(distance) = formula::distance_for_pitch(result.pitch) {
+                            if let Some(distance) =
+                                formula::display_distance_for_pitch(result.pitch, offset_m)
+                            {
                                 state.pitch = Some(result.pitch);
                                 state.distance = Some(distance);
                                 state.confidence = result.confidence;
