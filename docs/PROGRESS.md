@@ -83,6 +83,14 @@
 - 内置 `DISTANCE_OFFSET_M = -1.5`：显示距离 = 公式距离 + 偏移；`--offset` 可调。
 - 单元测试覆盖 38m↔39.5m 反推与锚点偏移。
 
+## UI 渲染重写（2026-08-13，EXAMPLE.png 反馈）
+
+- 用户截图确认：ColorKey+ClearType 方案产生"缺字方框"伪影，1px 阴影在
+  Bahnschrift 下有割裂感。
+- 改为 **UpdateLayeredWindow 每像素 alpha**：DIB 全透明背景 + 灰度抗锯齿
+  （ANTIALIASED_QUALITY）文字，alpha 由 max(r,g,b) 推导；无矩形框、无阴影、
+  无彩色 fringe。仅文字可见，清爽简洁。
+
 ## 待验证（Windows 实机）
 
 - 独占全屏下 WGC 能否抓到帧（若黑屏 → 无边框窗口化或换 DXGI 后端）；

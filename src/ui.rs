@@ -1,9 +1,11 @@
-//! Minimal Win32 UI: a semi-transparent, click-through overlay showing the
-//! current high-arc distance (large) and the pitch (small), Apex-themed font.
+//! Minimal Win32 UI: a fully transparent click-through overlay showing the
+//! current high-arc distance (large) and pitch (small), Apex-themed font.
 //!
-//! F9 toggles visibility, F10 toggles drag-move mode (position persisted in
-//! apex-angle-reader.ini next to the exe). Zero external GUI dependencies:
-//! raw FFI to user32/gdi32/kernel32/winmm only.
+//! Rendering uses UpdateLayeredWindow with per-pixel alpha (grayscale
+//! anti-aliasing), so there is no background rectangle, no color-key fringes
+//! and no shadow artifacts. F9 toggles visibility, F10/F11/Ctrl+Shift+M
+//! toggles drag-move mode (position persisted in apex-angle-reader.ini).
+//! Zero external GUI dependencies: raw FFI to user32/gdi32/kernel32/winmm.
 
 #![allow(non_camel_case_types)]
 #![allow(dead_code)]
@@ -20,6 +22,7 @@ type HBRUSH = *mut c_void;
 type HFONT = *mut c_void;
 type HPEN = *mut c_void;
 type HGDIOBJ = *mut c_void;
+type HBITMAP = *mut c_void;
 type LPCWSTR = *const u16;
 type WNDPROC = Option<unsafe extern "system" fn(HWND, u32, usize, isize) -> isize>;
 
@@ -28,6 +31,13 @@ type WNDPROC = Option<unsafe extern "system" fn(HWND, u32, usize, isize) -> isiz
 struct POINT {
     x: i32,
     y: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct SIZE {
+    cx: i32,
+    cy: i32,
 }
 
 #[repr(C)]
@@ -76,6 +86,38 @@ struct WNDCLASSEXW {
     h_icon_sm: HICON,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct BITMAPINFOHEADER {
+    bi_size: u32,
+    bi_width: i32,
+    bi_height: i32,
+    bi_planes: u16,
+    bi_bit_count: u16,
+    bi_compression: u32,
+    bi_size_image: u32,
+    bi_x_pels_per_meter: i32,
+    bi_y_pels_per_meter: i32,
+    bi_clr_used: u32,
+    bi_clr_important: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct BITMAPINFO {
+    bmi_header: BITMAPINFOHEADER,
+    bmi_colors: [u32; 1],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BLENDFUNCTION {
+    blend_op: u8,
+    blend_flags: u8,
+    source_constant_alpha: u8,
+    alpha_format: u8,
+}
+
 #[link(name = "user32")]
 extern "system" {
     fn RegisterClassExW(class: *const WNDCLASSEXW) -> u16;
@@ -98,10 +140,19 @@ extern "system" {
     fn UpdateWindow(hwnd: HWND) -> i32;
     fn InvalidateRect(hwnd: HWND, rect: *const RECT, erase: i32) -> i32;
     fn SetWindowPos(hwnd: HWND, after: HWND, x: i32, y: i32, w: i32, h: i32, flags: u32) -> i32;
-    fn SetLayeredWindowAttributes(hwnd: HWND, color: u32, alpha: u8, flags: u32) -> i32;
+    fn UpdateLayeredWindow(
+        hwnd: HWND,
+        dc_dst: HDC,
+        ppt_dst: *const POINT,
+        psize: *const SIZE,
+        dc_src: HDC,
+        ppt_src: *const POINT,
+        cr_key: u32,
+        pblend: *const BLENDFUNCTION,
+        flags: u32,
+    ) -> i32;
     fn RegisterHotKey(hwnd: HWND, id: i32, modifiers: u32, vk: u32) -> i32;
     fn UnregisterHotKey(hwnd: HWND, id: i32) -> i32;
-    fn GetMessageW(msg: *mut MSG, hwnd: HWND, min: u32, max: u32) -> i32;
     pub fn PeekMessageW(msg: *mut MSG, hwnd: HWND, min: u32, max: u32, remove: u32) -> i32;
     pub fn TranslateMessage(msg: *const MSG) -> i32;
     pub fn DispatchMessageW(msg: *const MSG) -> isize;
@@ -121,11 +172,9 @@ extern "system" {
 #[link(name = "gdi32")]
 extern "system" {
     fn CreateSolidBrush(color: u32) -> HBRUSH;
-    fn CreatePen(style: i32, width: i32, color: u32) -> HPEN;
     fn SelectObject(dc: HDC, obj: HGDIOBJ) -> HGDIOBJ;
     fn DeleteObject(obj: HGDIOBJ) -> i32;
     fn GetStockObject(kind: i32) -> HGDIOBJ;
-    fn FillRect(dc: HDC, rect: *const RECT, brush: HBRUSH) -> i32;
     fn SetBkMode(dc: HDC, mode: i32) -> i32;
     fn SetTextColor(dc: HDC, color: u32) -> u32;
     fn CreateFontW(
@@ -144,6 +193,16 @@ extern "system" {
         pitch: u32,
         face: LPCWSTR,
     ) -> HFONT;
+    fn CreateCompatibleDC(dc: HDC) -> HDC;
+    fn DeleteDC(dc: HDC) -> i32;
+    fn CreateDIBSection(
+        dc: HDC,
+        info: *const BITMAPINFO,
+        usage: u32,
+        bits: *mut *mut c_void,
+        section: HGDIOBJ,
+        offset: u32,
+    ) -> HBITMAP;
 }
 
 #[link(name = "winmm")]
@@ -179,21 +238,18 @@ const WS_EX_TOPMOST: u32 = 0x0000_0008;
 const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
 const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
 const WS_EX_LAYERED: u32 = 0x0008_0000;
-const WS_EX_TRANSPARENT: u32 = 0x0000_0020;
 const SW_SHOWNOACTIVATE: i32 = 4;
 const SW_HIDE: i32 = 0;
 const SWP_NOACTIVATE: u32 = 0x0010;
 const SWP_SHOWWINDOW: u32 = 0x0040;
 const SWP_HIDEWINDOW: u32 = 0x0080;
-const LWA_ALPHA: u32 = 0x0002;
-const LWA_COLORKEY: u32 = 0x0001;
 const WM_PAINT: u32 = 0x000F;
 const WM_NCHITTEST: u32 = 0x0084;
 const WM_DESTROY: u32 = 0x0002;
 const WM_HOTKEY: u32 = 0x0312;
 const WM_DISPLAYCHANGE: u32 = 0x007E;
 const WM_ERASEBKGND: u32 = 0x0014;
-pub const WM_QUIT: u32 = 0x0012;
+const WM_QUIT: u32 = 0x0012;
 const WM_EXITSIZEMOVE: u32 = 0x0232;
 const HTTRANSPARENT: isize = -1;
 const HTCAPTION: isize = 2;
@@ -206,12 +262,14 @@ const MOD_NOREPEAT: u32 = 0x4000;
 const CS_HREDRAW: u32 = 0x0002;
 const CS_VREDRAW: u32 = 0x0001;
 const SPI_GETWORKAREA: u32 = 0x0030;
-pub const PM_REMOVE: u32 = 0x0001;
+const PM_REMOVE: u32 = 0x0001;
 const FW_BOLD: i32 = 700;
 const DEFAULT_CHARSET: u32 = 1;
 const OUT_DEFAULT_PRECIS: u32 = 0;
 const CLIP_DEFAULT_PRECIS: u32 = 0;
-const CLEARTYPE_QUALITY: u32 = 5;
+// Grayscale anti-aliasing: blends cleanly on a fully transparent surface
+// (ClearType would produce colored fringes).
+const ANTIALIASED_QUALITY: u32 = 4;
 const DEFAULT_PITCH: u32 = 0;
 const TRANSPARENT_BK: i32 = 1;
 const DT_SINGLELINE: u32 = 0x20;
@@ -219,14 +277,18 @@ const DT_VCENTER: u32 = 0x04;
 const DT_CENTER: u32 = 0x01;
 const DT_NOCLIP: u32 = 0x100;
 const BLACK_BRUSH: i32 = 4;
-const HOLLOW_BRUSH: i32 = 5;
+const DIB_RGB_COLORS: u32 = 0;
+const BI_RGB: u32 = 0;
+const ULW_ALPHA: u32 = 0x2;
+const AC_SRC_OVER: u8 = 0;
+const AC_SRC_ALPHA: u8 = 1;
 
 const HOTKEY_TOGGLE: i32 = 1;
 const HOTKEY_QUIT: i32 = 2;
 const HOTKEY_MOVE: i32 = 3;
 
-const WINDOW_W: i32 = 220;
-const WINDOW_H: i32 = 88;
+const WINDOW_W: i32 = 240;
+const WINDOW_H: i32 = 90;
 
 /// UI state shown by the panel.
 #[derive(Clone, Copy, Debug, Default)]
@@ -242,7 +304,11 @@ pub struct Window {
     instance: HINSTANCE,
     big_font: HFONT,
     small_font: HFONT,
-    bg_brush: HBRUSH,
+    mem_dc: HDC,
+    bitmap: HBITMAP,
+    dib_bits: *mut u8,
+    dib_w: usize,
+    dib_h: usize,
     visible: bool,
     move_mode: bool,
     move_key: u32,
@@ -250,8 +316,7 @@ pub struct Window {
     top: i32,
     use_center_default: bool,
     state: PanelState,
-    shown: PanelState, // last painted
-    ini_path: Vec<u16>,
+    shown: PanelState,
     pub quit: bool,
 }
 
@@ -334,11 +399,7 @@ impl Window {
 
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_TOPMOST
-                    | WS_EX_TOOLWINDOW
-                    | WS_EX_NOACTIVATE
-                    | WS_EX_LAYERED
-                    | WS_EX_TRANSPARENT,
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
                 class_ptr.as_ptr(),
                 widestring("Apex Angle Reader").as_ptr(),
                 WS_POPUP,
@@ -354,9 +415,6 @@ impl Window {
         };
         if hwnd.is_null() {
             return Err("CreateWindowExW failed".into());
-        }
-        unsafe {
-            SetLayeredWindowAttributes(hwnd, 0, 200, LWA_COLORKEY | LWA_ALPHA);
         }
 
         // Apex-style industrial font (Bahnschrift ships with Win10 1809+;
@@ -374,7 +432,7 @@ impl Window {
                 DEFAULT_CHARSET,
                 OUT_DEFAULT_PRECIS,
                 CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY,
+                ANTIALIASED_QUALITY,
                 DEFAULT_PITCH,
                 widestring("Bahnschrift").as_ptr(),
             )
@@ -392,14 +450,33 @@ impl Window {
                 DEFAULT_CHARSET,
                 OUT_DEFAULT_PRECIS,
                 CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY,
+                ANTIALIASED_QUALITY,
                 DEFAULT_PITCH,
                 widestring("Bahnschrift").as_ptr(),
             )
         };
-        let bg_brush = unsafe { CreateSolidBrush(0) }; // black = color key (transparent)
-        if big_font.is_null() || small_font.is_null() || bg_brush.is_null() {
-            return Err("GDI object creation failed".into());
+        if big_font.is_null() || small_font.is_null() {
+            return Err("font creation failed".into());
+        }
+
+        // Off-screen 32bpp DIB for per-pixel-alpha composition.
+        let mut bits: *mut c_void = ptr::null_mut();
+        let mem_dc = unsafe { CreateCompatibleDC(ptr::null_mut()) };
+        let mut info: BITMAPINFO = unsafe { std::mem::zeroed() };
+        info.bmi_header.bi_size = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        info.bmi_header.bi_width = WINDOW_W;
+        info.bmi_header.bi_height = -WINDOW_H; // top-down
+        info.bmi_header.bi_planes = 1;
+        info.bmi_header.bi_bit_count = 32;
+        info.bmi_header.bi_compression = BI_RGB;
+        let bitmap = unsafe {
+            CreateDIBSection(mem_dc, &info, DIB_RGB_COLORS, &mut bits, ptr::null_mut(), 0)
+        };
+        if mem_dc.is_null() || bitmap.is_null() || bits.is_null() {
+            return Err("DIB creation failed".into());
+        }
+        unsafe {
+            SelectObject(mem_dc, bitmap as HGDIOBJ);
         }
 
         let mut win = Box::new(Window {
@@ -407,7 +484,11 @@ impl Window {
             instance,
             big_font,
             small_font,
-            bg_brush,
+            mem_dc,
+            bitmap,
+            dib_bits: bits as *mut u8,
+            dib_w: WINDOW_W as usize,
+            dib_h: WINDOW_H as usize,
             visible: true,
             move_mode: false,
             move_key: VK_F10,
@@ -416,7 +497,6 @@ impl Window {
             use_center_default,
             state: PanelState::default(),
             shown: PanelState::default(),
-            ini_path: module_sibling_ini(),
             quit: false,
         });
         unsafe {
@@ -424,8 +504,6 @@ impl Window {
             RegisterHotKey(hwnd, HOTKEY_TOGGLE, 0, VK_F9);
             let mut move_key = VK_F10;
             if RegisterHotKey(hwnd, HOTKEY_MOVE, 0, VK_F10) == 0 {
-                // F10 may be taken by the game/other tools; fall back to F11
-                // or Ctrl+Shift+M so dragging stays reachable.
                 if RegisterHotKey(hwnd, HOTKEY_MOVE, 0, VK_F11) == 0 {
                     RegisterHotKey(hwnd, HOTKEY_MOVE, MOD_CONTROL | MOD_SHIFT, 0x4D);
                     move_key = 0x4D;
@@ -441,6 +519,7 @@ impl Window {
                 0x51,
             );
             win.position();
+            win.render();
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             UpdateWindow(hwnd);
         }
@@ -455,8 +534,6 @@ impl Window {
         self.visible
     }
 
-    /// Override the panel top offset (physical pixels). -1 keeps the default
-    /// (center-lower) placement.
     pub fn set_top(&mut self, top: i32) {
         if top >= 0 {
             self.top = top;
@@ -481,10 +558,7 @@ impl Window {
             return;
         }
         self.shown = self.state;
-        unsafe {
-            InvalidateRect(self.hwnd, ptr::null(), 0);
-            UpdateWindow(self.hwnd);
-        }
+        self.render();
     }
 
     pub fn destroy(&mut self) {
@@ -494,10 +568,14 @@ impl Window {
             UnregisterHotKey(self.hwnd, HOTKEY_QUIT);
             DeleteObject(self.big_font as HGDIOBJ);
             DeleteObject(self.small_font as HGDIOBJ);
-            DeleteObject(self.bg_brush as HGDIOBJ);
-            self.big_font = ptr::null_mut();
-            self.small_font = ptr::null_mut();
-            self.bg_brush = ptr::null_mut();
+            if self.mem_dc != ptr::null_mut() {
+                DeleteDC(self.mem_dc);
+                self.mem_dc = ptr::null_mut();
+            }
+            if self.bitmap != ptr::null_mut() {
+                DeleteObject(self.bitmap as HGDIOBJ);
+                self.bitmap = ptr::null_mut();
+            }
             if !self.hwnd.is_null() {
                 DestroyWindow(self.hwnd);
                 self.hwnd = ptr::null_mut();
@@ -510,7 +588,6 @@ impl Window {
             let mut work = RECT::default();
             SystemParametersInfoW(SPI_GETWORKAREA, 0, (&mut work as *mut RECT).cast(), 0);
             let (x, y) = if self.use_center_default {
-                // Center, slightly below the vertical middle.
                 let x = work.left + (work.right - work.left - WINDOW_W) / 2;
                 let y = work.top + ((work.bottom - work.top) * 3) / 5;
                 (x, y)
@@ -531,6 +608,30 @@ impl Window {
                         SWP_HIDEWINDOW
                     },
             );
+            // Re-compose at the new position.
+            let mut pt = POINT { x, y };
+            let size = SIZE {
+                cx: WINDOW_W,
+                cy: WINDOW_H,
+            };
+            let blend = BLENDFUNCTION {
+                blend_op: AC_SRC_OVER,
+                blend_flags: 0,
+                source_constant_alpha: 255,
+                alpha_format: AC_SRC_ALPHA,
+            };
+            let src = POINT { x: 0, y: 0 };
+            UpdateLayeredWindow(
+                self.hwnd,
+                ptr::null_mut(),
+                &mut pt,
+                &size,
+                self.mem_dc,
+                &src,
+                0,
+                &blend,
+                ULW_ALPHA,
+            );
         }
     }
 
@@ -550,11 +651,7 @@ impl Window {
 
     fn toggle_move_mode(&mut self) {
         self.move_mode = !self.move_mode;
-        // Force a repaint so the mode hint appears/disappears.
-        unsafe {
-            InvalidateRect(self.hwnd, ptr::null(), 0);
-            UpdateWindow(self.hwnd);
-        }
+        self.render();
     }
 
     fn save_position(&mut self) {
@@ -573,41 +670,40 @@ impl Window {
         }
     }
 
-    fn paint(&mut self, hwnd: HWND) {
+    /// Compose the DIB (transparent background + antialiased text) and push
+    /// it to the layered window.
+    fn render(&mut self) {
         unsafe {
-            let mut ps: PAINTSTRUCT = std::mem::zeroed();
-            let dc = BeginPaint(hwnd, &mut ps);
-            let mut rect = RECT::default();
-            GetClientRect(hwnd, &mut rect);
-            FillRect(dc, &rect, self.bg_brush);
-            SetBkMode(dc, TRANSPARENT_BK);
+            // Clear to transparent (BGRA = 0).
+            std::ptr::write_bytes(self.dib_bits, 0, self.dib_w * self.dib_h * 4);
 
             let green = 0x82EB_70u32; // RGB(112,235,130)
             let gray = 0x9B91_8Cu32; // RGB(140,145,155)
             let white = 0xF8F3_F0u32;
 
             // Distance: the single most important number, big and centered.
-            let mut big_rect = RECT {
-                left: 8,
-                top: 4,
-                right: rect.right - 8,
-                bottom: 62,
-            };
             let text: Vec<u16> = match (self.state.distance, self.state.pitch) {
                 (Some(d), Some(_)) => widestring(&format!("{d:.1} m")),
                 _ => widestring("-- m"),
             };
+            SetBkMode(self.mem_dc, TRANSPARENT_BK);
+            SelectObject(self.mem_dc, self.big_font as HGDIOBJ);
             SetTextColor(
-                dc,
+                self.mem_dc,
                 if self.state.distance.is_some() {
                     green
                 } else {
                     gray
                 },
             );
-            SelectObject(dc, self.big_font as HGDIOBJ);
+            let mut big_rect = RECT {
+                left: 8,
+                top: 4,
+                right: WINDOW_W - 8,
+                bottom: 62,
+            };
             DrawTextW(
-                dc,
+                self.mem_dc,
                 text.as_ptr(),
                 text.len() as i32,
                 &mut big_rect,
@@ -615,12 +711,6 @@ impl Window {
             );
 
             // Pitch line (or move-mode hint).
-            let mut small_rect = RECT {
-                left: 8,
-                top: 62,
-                right: rect.right - 8,
-                bottom: rect.bottom - 4,
-            };
             let move_hint: String = if self.move_key == VK_F10 {
                 "拖动到目标位置 · 按 F10 锁定".to_string()
             } else if self.move_key == VK_F11 {
@@ -636,17 +726,66 @@ impl Window {
                     None => widestring("--"),
                 }
             };
-            SetTextColor(dc, if self.move_mode { white } else { gray });
-            SelectObject(dc, self.small_font as HGDIOBJ);
+            SelectObject(self.mem_dc, self.small_font as HGDIOBJ);
+            SetTextColor(self.mem_dc, if self.move_mode { white } else { gray });
+            let mut small_rect = RECT {
+                left: 8,
+                top: 62,
+                right: WINDOW_W - 8,
+                bottom: WINDOW_H - 4,
+            };
             DrawTextW(
-                dc,
+                self.mem_dc,
                 small.as_ptr(),
                 small.len() as i32,
                 &mut small_rect,
                 DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOCLIP,
             );
 
-            EndPaint(hwnd, &ps);
+            // Per-pixel alpha: GDI wrote premultiplied-ish color over a black
+            // (zero) background; derive alpha from the max channel so gray
+            // antialiasing blends smoothly and the background stays clear.
+            let n = self.dib_w * self.dib_h;
+            let px = std::slice::from_raw_parts_mut(self.dib_bits, n * 4);
+            for i in 0..n {
+                let b = px[i * 4 + 0] as u32;
+                let g = px[i * 4 + 1] as u32;
+                let r = px[i * 4 + 2] as u32;
+                let a = r.max(g).max(b) as u8;
+                px[i * 4 + 3] = a;
+            }
+
+            // Push to the layered window at its current screen position.
+            let mut wr = RECT::default();
+            GetWindowRect(self.hwnd, &mut wr);
+            let mut work = RECT::default();
+            SystemParametersInfoW(SPI_GETWORKAREA, 0, (&mut work as *mut RECT).cast(), 0);
+            let mut pt = POINT {
+                x: wr.left - work.left,
+                y: wr.top - work.top,
+            };
+            let size = SIZE {
+                cx: WINDOW_W,
+                cy: WINDOW_H,
+            };
+            let blend = BLENDFUNCTION {
+                blend_op: AC_SRC_OVER,
+                blend_flags: 0,
+                source_constant_alpha: 255,
+                alpha_format: AC_SRC_ALPHA,
+            };
+            let src = POINT { x: 0, y: 0 };
+            UpdateLayeredWindow(
+                self.hwnd,
+                ptr::null_mut(),
+                &mut pt,
+                &size,
+                self.mem_dc,
+                &src,
+                0,
+                &blend,
+                ULW_ALPHA,
+            );
         }
     }
 }
@@ -665,12 +804,15 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: usize, lpara
     let win = &mut *(win_ptr as *mut Window);
     match msg {
         WM_PAINT => {
-            win.paint(hwnd);
+            // Rendering is done via UpdateLayeredWindow in render(); keep the
+            // paint cycle valid.
+            let mut ps: PAINTSTRUCT = std::mem::zeroed();
+            BeginPaint(hwnd, &mut ps);
+            EndPaint(hwnd, &ps);
             0
         }
         WM_ERASEBKGND => 1,
         WM_NCHITTEST => {
-            // Click-through normally; draggable (HTCAPTION) in move mode.
             if win.move_mode {
                 HTCAPTION
             } else {
