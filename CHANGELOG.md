@@ -2,6 +2,9 @@
 
 ## 2026-08-13 — Rust 全重构：像素读取 → 实时"角度→距离"悬浮窗
 
+- 已发布 `49b8ebe`/`9f91e1c`/`17c79bc`；Windows CI run `31677369569` 全绿，
+  artifact `apex-angle-reader`（141KB）。实机验收待用户执行。
+
 - 完全弃用 C++ 与 OCR 方案（旧代码存档 `legacy-cpp/`）。
 - 新 Rust crate：xcap 捕获左上 ROI → 纯像素模板匹配读 `ang:` pitch →
   反解高抛公式 → 半透明悬浮窗直接显示"当前角度可抛出的距离"。

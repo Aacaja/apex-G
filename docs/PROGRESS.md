@@ -43,13 +43,20 @@
   负号擦除后拒绝、空帧拒绝。
 - macOS 不构建 Windows 二进制（用户明确：编译与使用全部走 GitHub Actions）。
 
-## 待验证（Windows 实机 / CI）
+## Windows CI（已验证）
 
-- CI 首次 `cargo build --release`（xcap 拉取、MSVC 链接）是否成功。
-- 实机：独占全屏下 WGC 能否抓到帧（若黑屏 → 无边框窗口化或换 DXGI 后端）；
-  −75°→30.0m 锚点核对；60Hz 灵敏度；CPU 占用。
+- 提交 `49b8ebe`（Rust 全重构）+ `9f91e1c`（cargo fmt）+ `17c79bc`
+  （修复 Windows-only 编译：import ptr、binarize 新签名）。
+- run `31677369569` 成功：fmt check ✓、`cargo test --lib` 3 passed ✓、
+  `cargo test --test ocr_test` 5 passed ✓、`cargo build --release` ✓。
+- artifact `apex-angle-reader`（144309 字节 ≈141KB）。
+
+## 待验证（Windows 实机）
+
+- 独占全屏下 WGC 能否抓到帧（若黑屏 → 无边框窗口化或换 DXGI 后端）；
+  −75°→30.0m 锚点核对；60Hz 灵敏度；CPU 占用（按 PERFORMANCE_TEST.md）。
 
 ## 发布状态
 
-- 待 push：本事务将把根目录从 C++ 项目切换为 Rust crate（旧代码移入
-  `legacy-cpp/`），并附带回滚事务 `artifacts/rust-rewrite/`。
+- 已发布：根目录已切换为 Rust crate（旧 C++ 在 `legacy-cpp/`），回滚事务
+  `artifacts/rust-rewrite/`（基线 47fe09e，独立副本实测恢复）。
