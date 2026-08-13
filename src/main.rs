@@ -40,10 +40,11 @@ fn main() {
 const TRIGGER_MIN_ABS_PITCH: f64 = 40.0;
 
 #[cfg(windows)]
-fn parse_args() -> Result<(capture::CaptureConfig, usize, usize)> {
+fn parse_args() -> Result<(capture::CaptureConfig, usize, i32, i32)> {
     let mut cfg = capture::CaptureConfig::default();
     let mut hz = 60usize;
-    let mut top = 96usize;
+    let mut left = -1i32;
+    let mut top = -1i32;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -79,23 +80,30 @@ fn parse_args() -> Result<(capture::CaptureConfig, usize, usize)> {
                     .and_then(|v| v.parse().ok())
                     .ok_or_else(|| anyhow::anyhow!("--top needs pixels"))?;
             }
+            "--left" => {
+                left = args
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or_else(|| anyhow::anyhow!("--left needs pixels"))?;
+            }
             "--help" | "-h" => {
                 println!(
                     "apex-angle-reader [--monitor N] [--roi x,y,w,h] [--hz 10..240] [--top px]\n\
-                     Defaults: monitor 0, roi 0,0,320,120, hz 60, panel top y=96.\n\
-                     F9 toggles the panel, Ctrl+Shift+Q quits."
+                     Defaults: monitor 0, roi 0,0,320,120, hz 60.\n\
+                     Panel: default center-lower; F10 drag-move (saved to ini),\n\
+                     F9 toggles, Ctrl+Shift+Q quits. --left/--top override."
                 );
                 std::process::exit(0);
             }
             other => bail!("unknown argument: {other}"),
         }
     }
-    Ok((cfg, hz, top))
+    Ok((cfg, hz, left, top))
 }
 
 #[cfg(windows)]
 fn main() -> Result<()> {
-    let (cfg, hz, top) = parse_args()?;
+    let (cfg, hz, left, top) = parse_args()?;
     let templates = templates::build_normalized();
     println!(
         "apex-angle-reader: monitor={} roi={},{},{}x{} hz={} top={}",
@@ -110,6 +118,7 @@ fn main() -> Result<()> {
         Ok(w) => w,
         Err(e) => bail!("window init failed: {e}"),
     };
+    win.set_left(left);
     win.set_top(top);
 
     unsafe {
@@ -178,7 +187,7 @@ fn main() -> Result<()> {
                 );
             }
             win.set_state(state);
-            win.present();
+            win.redraw_if_changed();
 
             // Pace to the requested rate.
             let work = now.elapsed();
