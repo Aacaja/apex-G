@@ -40,7 +40,7 @@ fn main() {
 const TRIGGER_MIN_ABS_PITCH: f64 = 40.0;
 
 #[cfg(windows)]
-fn parse_args() -> Result<(capture::CaptureConfig, usize, i32, i32)> {
+fn parse_args() -> Result<(capture::CaptureConfig, usize, i32, i32, f64)> {
     let mut cfg = capture::CaptureConfig::default();
     let mut hz = 60usize;
     let mut left = -1i32;
