@@ -60,6 +60,160 @@ pub struct Glyph {
     pub pixels: Vec<u8>, // w*h
 }
 
+/// Local-contrast binarizer: text = pixels clearly brighter than their 5x5
+/// neighbourhood (integral image). Global illumination does not matter, so
+/// bright snow scenes and dark caves both work as long as the white glyph
+/// stays locally brighter than its surroundings.
+pub fn binarize_local_contrast(
+    gray: &[u8],
+    rgb: &[u8],
+    width: usize,
+    height: usize,
+) -> BinaryImage {
+    const RADIUS: usize = 2; // 5x5 window
+    const CONTRAST: i32 = 32; // min local brightness delta
+    const MIN_GRAY: i32 = 70; // still needs some light
+    let mut pixels = vec![0u8; width * height];
+    // Integral image of gray.
+    let mut intg = vec![0i32; (width + 1) * (height + 1)];
+    for y in 0..height {
+        let mut row = 0i32;
+        for x in 0..width {
+            row += gray[y * width + x] as i32;
+            intg[(y + 1) * (width + 1) + (x + 1)] = intg[y * (width + 1) + (x + 1)] + row;
+        }
+    }
+    let sum = |x0: usize, y0: usize, x1: usize, y1: usize| -> i32 {
+        intg[(y1) * (width + 1) + (x1)]
+            - intg[(y0) * (width + 1) + (x1)]
+            - intg[(y1) * (width + 1) + (x0)]
+            + intg[(y0) * (width + 1) + (x0)]
+    };
+    let area = ((2 * RADIUS + 1) * (2 * RADIUS + 1)) as i32;
+    for y in 0..height {
+        for x in 0..width {
+            let x0 = x.saturating_sub(RADIUS);
+            let y0 = y.saturating_sub(RADIUS);
+            let x1 = (x + RADIUS).min(width - 1) + 1;
+            let y1 = (y + RADIUS).min(height - 1) + 1;
+            let mean = sum(x0, y0, x1, y1) / ((x1 - x0) * (y1 - y0)) as i32;
+            let i = y * width + x;
+            let g = gray[i] as i32;
+            if g >= MIN_GRAY && g - mean >= CONTRAST {
+                // Keep the near-neutral/white expectation too: reject strongly
+                // saturated background edges.
+                let j = i * 3;
+                let r = rgb[j] as i32;
+                let g2 = rgb[j + 1] as i32;
+                let b = rgb[j + 2] as i32;
+                let hi = r.max(g2).max(b);
+                let lo = r.min(g2).min(b);
+                if hi - lo <= 110 {
+                    pixels[i] = 1;
+                }
+            }
+        }
+    }
+    BinaryImage {
+        width,
+        height,
+        pixels,
+    }
+}
+
+/// Shadow-aware binarizer: white glyphs carry a dark drop shadow. Take every
+/// bright pixel (>=120), grow it into connected components, and keep an
+/// entire component only when its outer 1px border touches a dark pixel
+/// (luma <=90). Background surfaces never have that shadow ring.
+pub fn binarize_shadow(gray: &[u8], rgb: &[u8], width: usize, height: usize) -> BinaryImage {
+    const BRIGHT: u8 = 140;
+    const DARK: u8 = 92;
+    const MIN_SHADOW_PX: usize = 3; // dark pixels on the component border
+    let mut bright = vec![0u8; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            let i = y * width + x;
+            let g = gray[i];
+            if g >= BRIGHT {
+                // Keep only light/near-neutral or mildly tinted pixels.
+                let j = i * 3;
+                let r = rgb[j] as i32;
+                let g2 = rgb[j + 1] as i32;
+                let b = rgb[j + 2] as i32;
+                let hi = r.max(g2).max(b);
+                let lo = r.min(g2).min(b);
+                if hi - lo <= 100 {
+                    bright[i] = 1;
+                }
+            }
+        }
+    }
+    // Connected components (8-way) of the bright mask.
+    let mut visited = vec![false; width * height];
+    let mut out = vec![0u8; width * height];
+    let mut stack: Vec<(i32, i32)> = Vec::new();
+    for sy in 0..height as i32 {
+        for sx in 0..width as i32 {
+            let si = sy as usize * width + sx as usize;
+            if bright[si] == 0 || visited[si] {
+                continue;
+            }
+            let mut cells: Vec<(i32, i32)> = Vec::new();
+            stack.clear();
+            stack.push((sx, sy));
+            visited[si] = true;
+            while let Some((cx, cy)) = stack.pop() {
+                cells.push((cx, cy));
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+                        let nx = cx + dx;
+                        let ny = cy + dy;
+                        if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
+                            continue;
+                        }
+                        let ni = ny as usize * width + nx as usize;
+                        if bright[ni] != 0 && !visited[ni] {
+                            visited[ni] = true;
+                            stack.push((nx, ny));
+                        }
+                    }
+                }
+            }
+            // Count dark pixels on the component's outer border; a genuine
+            // shadow ring yields several of them.
+            let mut shadow_px = 0usize;
+            for &(cx, cy) in &cells {
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let nx = cx + dx;
+                        let ny = cy + dy;
+                        if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
+                            continue;
+                        }
+                        let ni = ny as usize * width + nx as usize;
+                        if bright[ni] == 0 && gray[ni] <= DARK {
+                            shadow_px += 1;
+                        }
+                    }
+                }
+            }
+            if shadow_px >= MIN_SHADOW_PX {
+                for &(cx, cy) in &cells {
+                    out[cy as usize * width + cx as usize] = 1;
+                }
+            }
+        }
+    }
+    BinaryImage {
+        width,
+        height,
+        pixels: out,
+    }
+}
+
 /// 8-connected component labeling.
 pub fn segment(bin: &BinaryImage) -> Vec<Glyph> {
     let w = bin.width;
@@ -173,20 +327,35 @@ fn score(a: &[u8; TEMPLATE_W * TEMPLATE_H], b: &[u8; TEMPLATE_W * TEMPLATE_H]) -
     0.76 * overlap + 0.24 * equal
 }
 
-pub fn classify(g: &Glyph, templates: &[NormalizedTemplate], allowed: &str) -> Option<(char, f64)> {
+/// Classify a glyph. Returns (char, best_score, margin) where margin is the
+/// difference between the best and the second-best glyph ids (per-id best
+/// across phase variants). A small margin means the match is ambiguous.
+pub fn classify(
+    g: &Glyph,
+    templates: &[NormalizedTemplate],
+    allowed: &str,
+) -> Option<(char, f64, f64)> {
     let mut norm = [0u8; TEMPLATE_W * TEMPLATE_H];
     normalize_glyph(g, &mut norm);
-    let mut best: Option<(char, f64)> = None;
+    // Per-id best score (phase variants share the same id).
+    let mut per_id: Vec<(char, f64)> = Vec::new();
     for t in templates {
         if !allowed.contains(t.id) {
             continue;
         }
         let s = score(&norm, &t.grid);
-        if best.map_or(true, |(_, bs)| s > bs) {
-            best = Some((t.id, s));
+        if let Some(e) = per_id.iter_mut().find(|(id, _)| *id == t.id) {
+            if s > e.1 {
+                e.1 = s;
+            }
+        } else {
+            per_id.push((t.id, s));
         }
     }
-    best
+    per_id.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let best = per_id.first()?;
+    let second = per_id.get(1).map(|e| e.1).unwrap_or(0.0);
+    Some((best.0, best.1, best.1 - second))
 }
 
 /// Find the `ANG:` label row and return its trailing digit region, or None
@@ -207,7 +376,7 @@ fn find_ang_line(
     let mut labels: Vec<(&Glyph, char, f64)> = glyphs
         .iter()
         .filter(|g| g.w >= 3 && g.h >= 3 && g.w <= 32 && g.h <= 32)
-        .filter_map(|g| classify(g, templates, "ANG").map(|(c, s)| (g, c, s)))
+        .filter_map(|g| classify(g, templates, "ANG").map(|(c, s, _)| (g, c, s)))
         .collect();
     labels.sort_by_key(|(g, _, _)| g.x);
 
@@ -253,7 +422,7 @@ fn find_ang_line(
                         && d <= window
                         && (2 * c.y + c.h as i32 - anchor_cy).abs() <= h_max
                         && classify(c, templates, "-.")
-                            .map_or(false, |(ch, sc)| (ch == '.' || ch == '-') && sc >= 0.4)
+                            .map_or(false, |(ch, sc, _)| (ch == '.' || ch == '-') && sc >= 0.4)
                 });
                 if !colon_ok {
                     continue;
@@ -263,7 +432,7 @@ fn find_ang_line(
                 // the digit region after the colon window. The pitch minus is
                 // far enough to survive.
                 let tol = h_max.max(6);
-                let mut chars: Vec<(i32, usize, char, f64)> = glyphs
+                let mut chars: Vec<(i32, usize, char, f64, f64)> = glyphs
                     .iter()
                     .filter(|c| {
                         (2 * c.y + c.h as i32 - anchor_cy).abs() <= tol
@@ -273,13 +442,15 @@ fn find_ang_line(
                             && c.h <= 48
                     })
                     .filter_map(|c| {
-                        classify(c, templates, "-+.0123456789").map(|(ch, s)| (c.x, c.w, ch, s))
+                        classify(c, templates, "-+.0123456789")
+                            .map(|(ch, s, gap)| (c.x, c.w, ch, s, gap))
                     })
-                    .filter(|(_, _, _, s)| *s >= 0.55)
+                    .filter(|(_, _, _, s, gap)| *s >= 0.55 && *gap >= 0.03)
                     .collect();
                 chars.sort_by_key(|c| c.0);
                 let digits: Vec<(i32, usize, char, f64)> = chars
                     .into_iter()
+                    .map(|(x, w, ch, s, _gap)| (x, w, ch, s))
                     .filter(|c| c.0 - g_right > window)
                     .collect();
                 if digits.len() < 3 {
@@ -370,4 +541,67 @@ pub fn recognize_pitch(bin: &BinaryImage, templates: &[NormalizedTemplate]) -> O
     }
     let confidence = 0.5 * label_confidence + 0.5 * score_sum / first.len() as f64;
     Some(PitchResult { pitch, confidence })
+}
+
+// Strategy masks for the multi-binarizer pipeline.
+pub const STRATEGY_GLOBAL: u8 = 1;
+pub const STRATEGY_CONTRAST: u8 = 2;
+pub const STRATEGY_SHADOW: u8 = 4;
+
+pub struct MultiPitchResult {
+    pub pitch: f64,
+    pub confidence: f64,
+    pub strategy_mask: u8,
+}
+
+/// Run the three binarizers (global threshold, local contrast, shadow-aware)
+/// over the same frame and combine the results:
+/// - the calibrated global strategy wins whenever it succeeds (others only
+///   corroborate and get OR-ed into the mask);
+/// - otherwise the best of contrast/shadow is used;
+/// - disagreeing values are never mixed.
+pub fn recognize_pitch_multi(
+    gray: &[u8],
+    rgb: &[u8],
+    width: usize,
+    height: usize,
+    templates: &[NormalizedTemplate],
+) -> Option<MultiPitchResult> {
+    let bins = [
+        (binarize(gray, rgb, width, height), STRATEGY_GLOBAL),
+        (
+            binarize_local_contrast(gray, rgb, width, height),
+            STRATEGY_CONTRAST,
+        ),
+        (binarize_shadow(gray, rgb, width, height), STRATEGY_SHADOW),
+    ];
+    let mut global: Option<(f64, f64)> = None;
+    let mut others: Vec<(f64, f64, u8)> = Vec::new();
+    for (bin, mask) in bins {
+        if let Some(r) = recognize_pitch(&bin, templates) {
+            if mask == STRATEGY_GLOBAL {
+                global = Some((r.pitch, r.confidence));
+            } else {
+                others.push((r.pitch, r.confidence, mask));
+            }
+        }
+    }
+    if let Some((p, c)) = global {
+        let corr = others
+            .iter()
+            .find(|(op, _, _)| (*op - p).abs() < 0.02)
+            .map(|(_, _, m)| *m)
+            .unwrap_or(0);
+        return Some(MultiPitchResult {
+            pitch: p,
+            confidence: c,
+            strategy_mask: STRATEGY_GLOBAL | corr,
+        });
+    }
+    others.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    others.first().map(|(p, c, m)| MultiPitchResult {
+        pitch: *p,
+        confidence: *c,
+        strategy_mask: *m,
+    })
 }

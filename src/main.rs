@@ -46,6 +46,7 @@ fn parse_args() -> Result<(capture::CaptureConfig, usize, i32, i32, f64)> {
     let mut left = -1i32;
     let mut top = -1i32;
     let mut offset_m = formula::DISTANCE_OFFSET_M;
+    let mut debug = false;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -81,6 +82,9 @@ fn parse_args() -> Result<(capture::CaptureConfig, usize, i32, i32, f64)> {
                     .and_then(|v| v.parse().ok())
                     .ok_or_else(|| anyhow::anyhow!("--top needs pixels"))?;
             }
+            "--debug" => {
+                debug = true;
+            }
             "--offset" => {
                 offset_m = args
                     .next()
@@ -106,12 +110,12 @@ fn parse_args() -> Result<(capture::CaptureConfig, usize, i32, i32, f64)> {
             other => bail!("unknown argument: {other}"),
         }
     }
-    Ok((cfg, hz, left, top, offset_m))
+    Ok((cfg, hz, left, top, offset_m, debug))
 }
 
 #[cfg(windows)]
 fn main() -> Result<()> {
-    let (cfg, hz, left, top, offset_m) = parse_args()?;
+    let (cfg, hz, left, top, offset_m, debug) = parse_args()?;
     let templates = templates::build_normalized();
     println!(
         "apex-angle-reader: monitor={} roi={},{},{}x{} hz={} top={}",
@@ -136,6 +140,10 @@ fn main() -> Result<()> {
     let mut last = Instant::now();
     let mut total_frames = 0u64;
     let mut ok_frames = 0u64;
+    // 2/3-frame hold: a transient miss keeps the last reading for at most 2
+    // frames so brief shadow/particle occlusion does not blank the panel.
+    let mut held: Option<(f64, f64, u8)> = None;
+    let mut held_frame = 0u64;
 
     loop {
         // Pump all queued messages (hotkeys, paint, quit).
@@ -167,13 +175,18 @@ fn main() -> Result<()> {
             let mut state = ui::PanelState::default();
             match capture::grab_roi_gray(&cfg) {
                 Ok((gray, rgb, w, h)) => {
-                    let bin = ocr::binarize(&gray, &rgb, w as usize, h as usize);
-                    if let Some(result) = ocr::recognize_pitch(&bin, &templates) {
+                    if let Some(result) =
+                        ocr::recognize_pitch_multi(&gray, &rgb, w as usize, h as usize, &templates)
+                    {
+                        held = Some((result.pitch, result.confidence, result.strategy_mask));
+                        held_frame = total_frames;
                         // The pitch line always updates so the user sees the
                         // tool is alive; the big distance only appears when
                         // the angle is steep enough to be meaningful.
                         state.pitch = Some(result.pitch);
                         state.confidence = result.confidence;
+                        state.strategy_mask = result.strategy_mask;
+                        state.debug = debug;
                         state.capture_ok = true;
                         if result.pitch.abs() > TRIGGER_MIN_ABS_PITCH {
                             if let Some(distance) =
@@ -182,6 +195,23 @@ fn main() -> Result<()> {
                                 state.distance = Some(distance);
                                 ok_frames += 1;
                             }
+                        }
+                    } else if let Some((p, c, m)) = held {
+                        if total_frames - held_frame <= 2 {
+                            state.pitch = Some(p);
+                            state.confidence = c;
+                            state.strategy_mask = m;
+                            state.debug = debug;
+                            state.capture_ok = true;
+                            if p.abs() > TRIGGER_MIN_ABS_PITCH {
+                                if let Some(distance) =
+                                    formula::display_distance_for_pitch(p, offset_m)
+                                {
+                                    state.distance = Some(distance);
+                                }
+                            }
+                        } else {
+                            held = None;
                         }
                     }
                 }

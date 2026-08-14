@@ -423,13 +423,33 @@ pub fn normalize_to_grid(rows: &[&str], out: &mut [u8; TEMPLATE_W * TEMPLATE_H])
     }
 }
 
-/// Build the pre-normalized template set (call once at startup).
+/// Build the pre-normalized template set (call once at startup). Each glyph
+/// also gets 4 one-pixel phase variants (shifted copies) so small raster
+/// misalignment between the capture and the offline extraction does not drop
+/// scores. classify() takes the best score per glyph id, so the variants do
+/// not create cross-character confusion.
 pub fn build_normalized() -> Vec<NormalizedTemplate> {
-    let mut out = Vec::with_capacity(TEMPLATES.len());
+    let mut out = Vec::with_capacity(TEMPLATES.len() * 5);
     for t in TEMPLATES {
         let mut grid = [0u8; TEMPLATE_W * TEMPLATE_H];
         normalize_to_grid(t.rows, &mut grid);
         out.push(NormalizedTemplate { id: t.id, grid });
+        for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+            let mut shifted = [0u8; TEMPLATE_W * TEMPLATE_H];
+            for y in 0..TEMPLATE_H {
+                for x in 0..TEMPLATE_W {
+                    let sx = x as i32 - dx;
+                    let sy = y as i32 - dy;
+                    if sx >= 0 && sy >= 0 && sx < TEMPLATE_W as i32 && sy < TEMPLATE_H as i32 {
+                        shifted[y * TEMPLATE_W + x] = grid[sy as usize * TEMPLATE_W + sx as usize];
+                    }
+                }
+            }
+            out.push(NormalizedTemplate {
+                id: t.id,
+                grid: shifted,
+            });
+        }
     }
     out
 }

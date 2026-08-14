@@ -297,6 +297,8 @@ pub struct PanelState {
     pub distance: Option<f64>,
     pub confidence: f64,
     pub capture_ok: bool,
+    pub strategy_mask: u8,
+    pub debug: bool,
 }
 
 pub struct Window {
@@ -722,7 +724,26 @@ impl Window {
                 widestring(&move_hint)
             } else {
                 match self.state.pitch {
-                    Some(p) => widestring(&format!("pitch {p:.1}")),
+                    Some(p) => {
+                        if self.state.debug {
+                            let mut strat = String::new();
+                            if self.state.strategy_mask & 1 != 0 {
+                                strat.push('A');
+                            }
+                            if self.state.strategy_mask & 2 != 0 {
+                                strat.push('B');
+                            }
+                            if self.state.strategy_mask & 4 != 0 {
+                                strat.push('C');
+                            }
+                            widestring(&format!(
+                                "pitch {p:.1} [{strat}] {:.2}",
+                                self.state.confidence
+                            ))
+                        } else {
+                            widestring(&format!("pitch {p:.1}"))
+                        }
+                    }
                     None => widestring("--"),
                 }
             };
